@@ -41,7 +41,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify repository, annotated tag, version, SHA, and main ancestry
+      - name: Verify repository, annotated tag, version, SHA, and current main identity
         id: identity
         shell: bash
         run: |
@@ -56,7 +56,7 @@ jobs:
           test "$version" = 0.1.0
           test "$GITHUB_REF_NAME" = "v$version"
           git fetch --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
           test -z "$(git ls-files '*.wasm')"
           echo "version=$version" >>"$GITHUB_OUTPUT"
       - name: Install all pinned release tools
@@ -158,7 +158,6 @@ jobs:
     permissions:
       contents: write
       attestations: read
-      id-token: write
       packages: read
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
@@ -669,10 +668,14 @@ jobs:
               "/orgs/dekopon-agents/packages/container/provider-memory-chat/versions/$version_id"
             if "$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
               >/dev/null 2>"$RUNNER_TEMP/deleted.err"; then
-              echo "error: run-owned final OCI reference survived cleanup" >&2
+              # Registry deletion is eventually consistent; the bounded absence poll below owns
+              # the deadline and verifies the complete package, not only this mutable reference.
+              :
+            elif ! grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' \
+              "$RUNNER_TEMP/deleted.err"; then
+              cat "$RUNNER_TEMP/deleted.err" >&2
               exit 1
             fi
-            grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' "$RUNNER_TEMP/deleted.err"
           elif ! grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' \
             "$RUNNER_TEMP/descriptor.err"; then
             cat "$RUNNER_TEMP/descriptor.err" >&2
@@ -681,4 +684,55 @@ jobs:
 
           if [[ "$release_owned" == true ]]; then
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+          fi
+
+          api_absent() {
+            local endpoint=$1
+            local label=$2
+            if gh api "$endpoint" >"$RUNNER_TEMP/$label.json" \
+              2>"$RUNNER_TEMP/$label.err"; then
+              return 1
+            fi
+            grep -Eqi 'not found|404' "$RUNNER_TEMP/$label.err"
+          }
+
+          restored=false
+          for _attempt in {1..30}; do
+            release_id_absent=true
+            if [[ -n "$release_id" ]] && ! api_absent \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id" cleanup-release-id; then
+              release_id_absent=false
+            fi
+            release_tag_absent=false
+            if api_absent "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" \
+              cleanup-release-tag; then
+              release_tag_absent=true
+            fi
+            oci_absent=false
+            if "$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
+              >"$RUNNER_TEMP/cleanup-oci.json" 2>"$RUNNER_TEMP/cleanup-oci.err"; then
+              :
+            elif grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' \
+              "$RUNNER_TEMP/cleanup-oci.err"; then
+              oci_absent=true
+            else
+              cat "$RUNNER_TEMP/cleanup-oci.err" >&2
+              exit 1
+            fi
+            package_absent=false
+            if api_absent \
+              /orgs/dekopon-agents/packages/container/provider-memory-chat \
+              cleanup-package; then
+              package_absent=true
+            fi
+            if [[ "$release_id_absent" == true && "$release_tag_absent" == true && \
+                  "$oci_absent" == true && "$package_absent" == true ]]; then
+              restored=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$restored" != true ]]; then
+            echo "error: failed cleanup did not restore original release/package absence" >&2
+            exit 1
           fi

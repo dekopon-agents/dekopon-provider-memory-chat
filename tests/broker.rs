@@ -1,10 +1,58 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use dekopon_provider_sdk_testkit::{FakeBroker, StorageAccess, StorageInterface, StorageLimits};
 use serde_json::{Value, json};
 
 fn component() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("memory-chat-provider.wasm")
+}
+
+fn stored_turns_path(root: &Path) -> PathBuf {
+    fn visit(directory: &Path, matches: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).expect("walk storage root") {
+            let path = entry.expect("storage entry").path();
+            if path.is_dir() {
+                visit(&path, matches);
+            } else if path.parent().and_then(Path::file_name) == Some("data".as_ref())
+                && fs::read(&path)
+                    .expect("read opaque logical file")
+                    .windows(b"dekopon.chat-memory.turn".len())
+                    .any(|window| window == b"dekopon.chat-memory.turn")
+            {
+                matches.push(path);
+            }
+        }
+    }
+
+    let mut matches = Vec::new();
+    visit(root, &mut matches);
+    assert_eq!(matches.len(), 1, "exactly one turns log must exist");
+    matches.pop().expect("turns log")
+}
+
+fn canonical_turn_bytes(id: &str, commitment: &str, user: &str, assistant: &str) -> u64 {
+    format!(
+        "{{\"format\":\"dekopon.chat-memory.turn\",\"version\":1,\"id\":{},\"commitment\":{},\"user\":{},\"assistant\":{}}}",
+        serde_json::to_string(id).expect("id JSON"),
+        serde_json::to_string(commitment).expect("commitment JSON"),
+        serde_json::to_string(user).expect("user JSON"),
+        serde_json::to_string(assistant).expect("assistant JSON")
+    )
+    .len() as u64
+        + 1
+}
+
+fn canonical_dedup_bytes(id: &str, commitment: &str) -> u64 {
+    format!(
+        "{{\"format\":\"dekopon.chat-memory.dedup\",\"version\":1,\"id\":{},\"commitment\":{}}}",
+        serde_json::to_string(id).expect("id JSON"),
+        serde_json::to_string(commitment).expect("commitment JSON")
+    )
+    .len() as u64
+        + 1
 }
 
 fn record(id: &str, commitment: &str, user: &str, assistant: &str) -> Value {
@@ -51,6 +99,105 @@ async fn broker() -> FakeBroker {
         .build()
         .await
         .expect("memory-chat loads with exactly JSONL storage")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn checked_component_manifest_and_command_resolution_are_exact() {
+    let broker = broker().await;
+    let manifests = broker.registry().manifests().collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(
+        serde_json::to_value(manifests[0]).expect("manifest JSON"),
+        json!({
+            "apiVersion": "dekopon.dev/provider/v1alpha1",
+            "id": "memory-chat",
+            "description": "Durable, on-demand, namespace-isolated chat memory",
+            "commandWords": ["memory"],
+            "capabilities": [
+                {
+                    "id": "memory.chat.record",
+                    "description": "Records one gateway-attested transport-accepted turn",
+                    "effect": "local-write",
+                    "risk": "Medium",
+                    "idempotency": "conditional",
+                    "inputSchema": {"type":"object","additionalProperties":false}
+                },
+                {
+                    "id": "memory.chat.recent",
+                    "description": "Returns recent durable turns in chronological order",
+                    "effect": "read-only",
+                    "risk": "High",
+                    "idempotency": "idempotent",
+                    "inputSchema": {
+                        "type":"object",
+                        "properties":{"last":{"type":"integer","minimum":1}},
+                        "required":["last"],
+                        "additionalProperties":false
+                    }
+                },
+                {
+                    "id": "memory.chat.search",
+                    "description": "Searches recent durable turns with literal case-insensitive matching",
+                    "effect": "read-only",
+                    "risk": "High",
+                    "idempotency": "idempotent",
+                    "inputSchema": {
+                        "type":"object",
+                        "properties":{"query":{"type":"string","minLength":1}},
+                        "required":["query"],
+                        "additionalProperties":false
+                    }
+                }
+            ]
+        })
+    );
+
+    let recent = broker
+        .registry()
+        .resolve_command("memory", &["recent".into(), "--last".into(), "3".into()])
+        .await
+        .expect("recent command resolves through component");
+    assert_eq!(
+        serde_json::to_value(recent).expect("recent resolution JSON"),
+        json!({
+            "outcome": "resolved",
+            "capability": "memory.chat.recent",
+            "input": {"last": 3}
+        })
+    );
+
+    let search = broker
+        .registry()
+        .resolve_command(
+            "memory",
+            &["search".into(), "--query".into(), "needle".into()],
+        )
+        .await
+        .expect("search command resolves through component");
+    assert_eq!(
+        serde_json::to_value(search).expect("search resolution JSON"),
+        json!({
+            "outcome": "resolved",
+            "capability": "memory.chat.search",
+            "input": {"query": "needle"}
+        })
+    );
+
+    let record = broker
+        .registry()
+        .resolve_command("memory", &["record".into()])
+        .await
+        .expect("record is declined by the component");
+    assert_eq!(
+        serde_json::to_value(record).expect("record resolution JSON"),
+        json!({
+            "outcome": "failed",
+            "error": {
+                "code": "usage",
+                "message": "usage: memory recent --last N | memory search --query TEXT"
+            }
+        })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -273,6 +420,85 @@ async fn size_read_and_replace_host_failures_are_terminal_and_transactional() {
         .await
         .expect("failed replacement rolls back both provisional appends");
     assert!(after["turns"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn canonical_turn_and_dedup_byte_bounds_accept_exactly_and_reject_one_less() {
+    let exact_turn = broker().await;
+    let turn_bytes = canonical_turn_bytes("turn-bound", "turn-c", "user", "assistant");
+    let mut input = record("turn-bound", "turn-c", "user", "assistant");
+    input["maxTurnBytes"] = json!(turn_bytes);
+    exact_turn
+        .invoke("memory.chat.record", input)
+        .await
+        .expect("exact maxTurnBytes accepts the complete canonical line");
+
+    let short_turn = broker().await;
+    let mut input = record("turn-bound", "turn-c", "user", "assistant");
+    input["maxTurnBytes"] = json!(turn_bytes - 1);
+    let error = short_turn
+        .invoke("memory.chat.record", input)
+        .await
+        .expect_err("one byte below maxTurnBytes is rejected");
+    assert_eq!(
+        error.provider_failure().map(|value| value.0),
+        Some("result-too-large")
+    );
+
+    let exact_dedup = broker().await;
+    let dedup_bytes = canonical_dedup_bytes("dedup-bound", "dedup-c");
+    let mut input = record("dedup-bound", "dedup-c", "user", "assistant");
+    input["maxDedupBytes"] = json!(dedup_bytes);
+    exact_dedup
+        .invoke("memory.chat.record", input)
+        .await
+        .expect("exact maxDedupBytes accepts the complete canonical line");
+
+    let short_dedup = broker().await;
+    let mut input = record("dedup-bound", "dedup-c", "user", "assistant");
+    input["maxDedupBytes"] = json!(dedup_bytes - 1);
+    let error = short_dedup
+        .invoke("memory.chat.record", input)
+        .await
+        .expect_err("one byte below maxDedupBytes is rejected");
+    assert_eq!(
+        error.provider_failure().map(|value| value.0),
+        Some("dedup-capacity")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn corrupt_and_truncated_host_backed_turn_logs_fail_closed() {
+    let fixtures = [
+        br#"{"format":"dekopon.chat-memory.turn","version":2,"id":"bad","commitment":"c","user":"u","assistant":"a"}
+"#.as_slice(),
+        br#"{"format":"dekopon.chat-memory.turn","version":1,"id":"bad","commitment":"c","user":"u","assistant":"a","unknown":true}
+"#.as_slice(),
+        b"{\"format\":\n".as_slice(),
+        br#"{"format":"dekopon.chat-memory.turn","version":1,"id":"bad","commitment":"c","user":"u","assistant":"a"}"#.as_slice(),
+    ];
+
+    for (index, fixture) in fixtures.into_iter().enumerate() {
+        let broker = broker().await;
+        broker
+            .invoke(
+                "memory.chat.record",
+                record("seed", "seed-c", "user", "assistant"),
+            )
+            .await
+            .expect("seed host-backed turns log");
+        fs::write(stored_turns_path(broker.storage_root()), fixture)
+            .expect("install corrupt host-backed fixture");
+        let error = broker
+            .invoke("memory.chat.recent", recent(1, 65_536))
+            .await
+            .expect_err("corrupt host-backed turns log must fail closed");
+        assert_eq!(
+            error.provider_failure().map(|value| value.0),
+            Some("memory-corrupt"),
+            "fixture {index}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

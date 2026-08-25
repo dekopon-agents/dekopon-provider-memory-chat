@@ -519,10 +519,52 @@ mod tests {
 
     #[test]
     fn manifest_is_exact_and_record_is_not_a_command() {
-        let manifest = MemoryChat::manifest();
-        assert_eq!(manifest.id.as_str(), "memory-chat");
-        assert_eq!(manifest.command_words, ["memory"]);
-        assert_eq!(manifest.capabilities.len(), 3);
+        let manifest = serde_json::to_value(MemoryChat::manifest()).expect("manifest JSON");
+        assert_eq!(
+            manifest,
+            serde_json::json!({
+                "apiVersion": "dekopon.dev/provider/v1alpha1",
+                "id": "memory-chat",
+                "description": "Durable, on-demand, namespace-isolated chat memory",
+                "commandWords": ["memory"],
+                "capabilities": [
+                    {
+                        "id": "memory.chat.record",
+                        "description": "Records one gateway-attested transport-accepted turn",
+                        "effect": "local-write",
+                        "risk": "Medium",
+                        "idempotency": "conditional",
+                        "inputSchema": {"type":"object","additionalProperties":false}
+                    },
+                    {
+                        "id": "memory.chat.recent",
+                        "description": "Returns recent durable turns in chronological order",
+                        "effect": "read-only",
+                        "risk": "High",
+                        "idempotency": "idempotent",
+                        "inputSchema": {
+                            "type":"object",
+                            "properties":{"last":{"type":"integer","minimum":1}},
+                            "required":["last"],
+                            "additionalProperties":false
+                        }
+                    },
+                    {
+                        "id": "memory.chat.search",
+                        "description": "Searches recent durable turns with literal case-insensitive matching",
+                        "effect": "read-only",
+                        "risk": "High",
+                        "idempotency": "idempotent",
+                        "inputSchema": {
+                            "type":"object",
+                            "properties":{"query":{"type":"string","minLength":1}},
+                            "required":["query"],
+                            "additionalProperties":false
+                        }
+                    }
+                ]
+            })
+        );
         assert!(
             MemoryChat::resolve_command(&["record".into()])
                 .expect_err("record never resolves")
