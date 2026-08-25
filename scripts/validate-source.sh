@@ -16,7 +16,7 @@ git diff --check
 bash -n build.sh scripts/*.sh
 shellcheck build.sh scripts/*.sh
 python3 -m py_compile scripts/*.py
-ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load_file(path, aliases: true) }' .github/workflows/*.yml
+ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/*.yml
 actionlint -color
 ./scripts/validate-workflows.sh
 printf 'source, native, MSRV, Wasm check, dependency, license, WIT, shell, action, and no-tracked-Wasm gates passed\n'
