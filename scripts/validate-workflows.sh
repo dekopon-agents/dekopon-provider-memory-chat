@@ -102,6 +102,7 @@ for required in \
   'SOURCE_TAG_OBJECT: 5bcd812905abe6fd9564be1366b955a9da5a921c' \
   'EXPECTED_SHA: 65f82d6a422b0500269333b79be06c4155d7793df1f80ced12a8b214acb53a6b' \
   './scripts/recover-v0.1.0-artifacts.sh "$RUNNER_TEMP/tagged"' \
+  'cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools' \
   '"$SOURCE_RUN_ID" "$SOURCE_RUN_ATTEMPT"' \
   'git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main'; do
   grep -Fq "$required" "$recovery" || {

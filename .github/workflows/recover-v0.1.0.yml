@@ -95,6 +95,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: ./scripts/recover-v0.1.0-artifacts.sh "$RUNNER_TEMP/tagged"
+      - name: Install pinned component validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$PROVIDER_RUST_TOOLCHAIN" --profile minimal
+          cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools \
+            --version "$WASM_TOOLS_VERSION" --locked
       - name: Stage exact source artifacts
         shell: bash
         run: |
