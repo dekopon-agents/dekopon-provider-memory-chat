@@ -511,9 +511,8 @@ jobs:
 
           # Revalidate the complete public OCI and owned-draft cardinality immediately before the
           # final mutation. A concurrent extra tag, version, or run-owned draft must stop release.
-          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" --output json \
-            >"$RUNNER_TEMP/final-tags.json"
-          jq -e '(.tags | sort) == ["0.1.0"]' "$RUNNER_TEMP/final-tags.json" >/dev/null
+          test "$("${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort)" = \
+            "0.1.0"
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
             "$MANIFEST_DIGEST"
           gh api --paginate \
@@ -684,17 +683,22 @@ jobs:
             gh api --paginate \
               /orgs/dekopon-agents/packages/container/provider-memory-chat/versions?per_page=100 \
               >"$RUNNER_TEMP/cleanup-versions.jsons"
-            version_id=$(jq -ser --arg digest "$digest" '
+            jq -se --arg digest "$digest" '
               [.[][]] as $versions |
-              if ($versions | length) == 1 and
-                 $versions[0].name == $digest and
-                 (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
-              then $versions[0].id
-              else error("manifest is missing, shared, or has another tag/version") end
-            ' "$RUNNER_TEMP/cleanup-versions.jsons")
-            [[ "$version_id" =~ ^[0-9]+$ ]]
+              ($versions | length) == 1 and
+              $versions[0].name == $digest and
+              (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+            ' "$RUNNER_TEMP/cleanup-versions.jsons" >/dev/null
+            package=$(gh api \
+              /orgs/dekopon-agents/packages/container/provider-memory-chat)
+            jq -e '
+              .name == "provider-memory-chat" and .package_type == "container" and
+              (.visibility == "private" or .visibility == "public")
+            ' <<<"$package" >/dev/null
+            # GitHub refuses deletion of the sole tagged version. After proving this run owns the
+            # package's only manifest/version, delete the whole previously absent package.
             gh api --method DELETE \
-              "/orgs/dekopon-agents/packages/container/provider-memory-chat/versions/$version_id"
+              /orgs/dekopon-agents/packages/container/provider-memory-chat
             if "$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
               >/dev/null 2>"$RUNNER_TEMP/deleted.err"; then
               # Registry deletion is eventually consistent; the bounded absence poll below owns
