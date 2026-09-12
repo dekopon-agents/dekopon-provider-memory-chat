@@ -30,10 +30,11 @@ for required in \
   'Reject tracked Wasm' \
   './scripts/validate-source.sh' \
   './scripts/reproducible-build.sh'; do
-  grep -Fq "$required" "$ci"
+  grep -Fq -- "$required" "$ci"
 done
 for required in \
-  '"v0.1.0"' \
+  '      - "v*"' \
+  'test "$GITHUB_REF_NAME" = "v$version"' \
   'git cat-file -t' \
   'subject-path: dist/memory-chat-provider.wasm' \
   'predicate-type: https://cyclonedx.org/bom' \
@@ -53,8 +54,20 @@ for required in \
   'final-owned-draft.json' \
   '/orgs/dekopon-agents/packages/container/provider-memory-chat' \
   'jq -sr --arg marker "$marker"'; do
-  grep -Fq "$required" "$release"
+  grep -Fq -- "$required" "$release"
 done
+if grep -Fq 'v0.1.0' "$release"; then
+  echo 'error: release workflow is pinned to a single version' >&2
+  exit 1
+fi
+if grep -Eq 'test "\$(version|VERSION)" = [0-9]' "$release"; then
+  echo 'error: release workflow asserts a literal crate version' >&2
+  exit 1
+fi
+if grep -Fq 'dekopon-run' "$release" "$ci"; then
+  echo 'error: dekopon-run is retired and has no 0.13.0' >&2
+  exit 1
+fi
 if grep -Fq 'jq -ser --arg marker "$marker"' "$release"; then
   echo 'error: draft visibility polling still fails on an intentionally empty result' >&2
   exit 1

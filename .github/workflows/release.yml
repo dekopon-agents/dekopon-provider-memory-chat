@@ -1,25 +1,23 @@
-name: Immutable v0.1.0 release
+name: Release
 
 on:
   push:
     tags:
-      - "v0.1.0"
+      - "v*"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-v0.1.0
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
-  PROVIDER_MSRV: "1.89.0"
-  PROVIDER_RUST_TOOLCHAIN: "1.97.0"
-  WASM_TOOLS_VERSION: "1.236.1"
+  PROVIDER_RUST_TOOLCHAIN: "1.98.1"
+  WASM_TOOLS_VERSION: "1.259.0"
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_CYCLONEDX_VERSION: "0.5.9"
-  DEKOPON_RUN_VERSION: "0.11.1"
-  WASMTIME_VERSION: "48.0.0"
+  WASMTIME_VERSION: "48.0.2"
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_LINUX_AMD64_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
   ORAS_VERSION: "1.2.3"
@@ -28,7 +26,7 @@ env:
 
 jobs:
   build:
-    name: verify immutable source and exact component
+    name: verify tagged source and exact component
     if: github.repository == 'dekopon-agents/dekopon-provider-memory-chat'
     runs-on: ubuntu-24.04
     permissions:
@@ -36,7 +34,7 @@ jobs:
     outputs:
       version: ${{ steps.identity.outputs.version }}
     steps:
-      - name: Check out immutable tag without credentials
+      - name: Check out the tag without credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
@@ -47,13 +45,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = dekopon-agents/dekopon-provider-memory-chat
-          test "$GITHUB_REF_NAME" = v0.1.0
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
           test "$(git rev-parse "$GITHUB_REF_NAME^{}")" = "$GITHUB_SHA"
           version=$(cargo metadata --locked --no-deps --format-version 1 |
             jq -er '.packages[] | select(.name == "dekopon-memory-chat-provider") | .version')
-          test "$version" = 0.1.0
           test "$GITHUB_REF_NAME" = "v$version"
           git fetch --no-tags origin main:refs/remotes/origin/main
           test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
@@ -63,7 +59,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install "$PROVIDER_MSRV" --profile minimal
           rustup toolchain install "$PROVIDER_RUST_TOOLCHAIN" --profile minimal \
             --component clippy --component rustfmt
           rustup target add wasm32-unknown-unknown --toolchain "$PROVIDER_RUST_TOOLCHAIN"
@@ -73,8 +68,6 @@ jobs:
             --version "$CARGO_CYCLONEDX_VERSION" --locked
           cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools \
             --version "$WASM_TOOLS_VERSION" --locked
-          cargo +"$PROVIDER_RUST_TOOLCHAIN" install dekopon-run \
-            --version "$DEKOPON_RUN_VERSION" --locked
           cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasmtime-cli \
             --version "$WASMTIME_VERSION" --locked
           sudo apt-get update
@@ -190,24 +183,18 @@ jobs:
           ./scripts/verify-release-assets.sh "$PWD/dist"
           gh attestation verify dist/memory-chat-provider.wasm --repo "$GITHUB_REPOSITORY" --predicate-type https://slsa.dev/provenance/v1
           gh attestation verify dist/memory-chat-provider.wasm --repo "$GITHUB_REPOSITORY" --predicate-type https://cyclonedx.org/bom
-      - name: Prove the release and entire final GHCR package are absent
+      - name: Prove this tag's release is absent
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" \
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
             >"$RUNNER_TEMP/existing-release.json" 2>"$RUNNER_TEMP/release.err"; then
-            echo "error: immutable v0.1.0 release already exists" >&2
+            echo "error: release $GITHUB_REF_NAME already exists" >&2
             exit 1
           fi
           grep -Eqi 'not found|404' "$RUNNER_TEMP/release.err"
-          if gh api /orgs/dekopon-agents/packages/container/provider-memory-chat \
-            >"$RUNNER_TEMP/existing-package.json" 2>"$RUNNER_TEMP/package.err"; then
-            echo "error: final provider-memory-chat package already exists" >&2
-            exit 1
-          fi
-          grep -Eqi 'not found|404' "$RUNNER_TEMP/package.err"
       - name: Create a run-marked draft with exactly two assets
         id: create
         env:
@@ -218,15 +205,15 @@ jobs:
           marker="provider-memory-chat-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           printf '%s\n\nAwaiting verified OCI manifest before finalization.\n' "$marker" \
             >"$RUNNER_TEMP/draft-notes.md"
-          gh release create v0.1.0 --verify-tag --draft --title v0.1.0 \
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/draft-notes.md" \
             dist/memory-chat-provider.wasm dist/memory-chat-provider.wasm.sha256
           release_id=
           for _attempt in {1..30}; do
             release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-              jq -sr --arg marker "$marker" '
+              jq -sr --arg marker "$marker" --arg tag "$GITHUB_REF_NAME" '
                 [.[][] | select(
-                  .draft == true and .tag_name == "v0.1.0" and
+                  .draft == true and .tag_name == $tag and
                   ((.body // "") | startswith($marker))
                 )] |
                 if length == 1 then .[0].id elif length == 0 then empty
@@ -247,8 +234,8 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/draft.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == true and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == true and .tag_name == $tag and
             ((.body // "") | startswith($marker)) and
             ([.assets[].name] | sort) ==
               ["memory-chat-provider.wasm", "memory-chat-provider.wasm.sha256"]
@@ -305,7 +292,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push only 0.1.0, verify manifest, make public, and pull anonymously
+      - name: Push only this version, verify manifest, make public, and pull anonymously
         id: publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -315,17 +302,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$VERSION" = 0.1.0
+          test "$GITHUB_REF_NAME" = "v$VERSION"
           run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           ref="$OCI_REPOSITORY:$VERSION"
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/owned-draft.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == true and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == true and .tag_name == $tag and
             ((.body // "") | startswith($marker))
           ' "$RUNNER_TEMP/owned-draft.json" >/dev/null
           if "$RUNNER_TEMP/oras-bin" manifest fetch --descriptor "$ref" \
             >"$RUNNER_TEMP/existing.json" 2>"$RUNNER_TEMP/existing.err"; then
-            echo "error: immutable final OCI reference already exists" >&2
+            echo "error: OCI reference $ref already exists" >&2
             exit 1
           fi
           grep -Eqi 'not found|manifest unknown|MANIFEST_UNKNOWN|404' "$RUNNER_TEMP/existing.err"
@@ -349,7 +336,7 @@ jobs:
           "$RUNNER_TEMP/oras-bin" manifest fetch "$OCI_REPOSITORY@$digest" \
             >"$RUNNER_TEMP/authenticated-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/authenticated-manifest.json" \
-            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA"
+            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA" "$VERSION"
 
           for _ in {1..30}; do
             visibility=$(gh api /orgs/dekopon-agents/packages/container/provider-memory-chat \
@@ -369,7 +356,7 @@ jobs:
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$digest"
           "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/anonymous-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/anonymous-manifest.json" \
-            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA"
+            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA" "$VERSION"
           mkdir "$RUNNER_TEMP/anonymous-pull"
           "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/anonymous-pull"
           test "$(find "$RUNNER_TEMP/anonymous-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
@@ -380,11 +367,13 @@ jobs:
           gh api --paginate \
             /orgs/dekopon-agents/packages/container/provider-memory-chat/versions?per_page=100 \
             >"$RUNNER_TEMP/versions.jsons"
-          jq -se --arg digest "$digest" '
+          jq -se --arg digest "$digest" --arg version "$VERSION" '
             [.[][]] as $versions |
-            ($versions | length) == 1 and
-            $versions[0].name == $digest and
-            (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+            [$versions[] | select(.name == $digest)] as $owned |
+            ($owned | length) == 1 and
+            (($owned[0].metadata.container.tags // []) | sort) == [$version] and
+            ([$versions[] | select(.name != $digest) |
+              (.metadata.container.tags // [])[]] | index($version)) == null
           ' "$RUNNER_TEMP/versions.jsons" >/dev/null
 
   finalize:
@@ -440,7 +429,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$VERSION" = 0.1.0
+          test "$GITHUB_REF_NAME" = "v$VERSION"
           [[ "$MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           ref="$OCI_REPOSITORY:$VERSION"
@@ -458,8 +447,8 @@ jobs:
             "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$RUNNER_TEMP/final-draft.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == true and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == true and .tag_name == $tag and
             ((.body // "") | startswith($marker)) and
             ([.assets[].name] | sort) ==
               ["memory-chat-provider.wasm", "memory-chat-provider.wasm.sha256"]
@@ -481,7 +470,7 @@ jobs:
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$MANIFEST_DIGEST"
           "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/final-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/final-manifest.json" \
-            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA"
+            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA" "$VERSION"
           mkdir "$RUNNER_TEMP/final-pull"
           "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/final-pull"
           test "$(find "$RUNNER_TEMP/final-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
@@ -490,44 +479,52 @@ jobs:
           cat >"$RUNNER_TEMP/release-notes.md" <<EOF
           $MARKER
 
-          Broker-only durable chat memory using broker-owned JSONL storage and invocation transactions. OCI manifest:
-          \`$OCI_REPOSITORY@$MANIFEST_DIGEST\` (tag \`0.1.0\`). The anonymous OCI layer is byte-identical
-          to \`memory-chat-provider.wasm\`; verify it with the attached SHA-256 file.
+          Broker-only durable chat memory using broker-owned JSONL storage. OCI manifest:
+          \`$OCI_REPOSITORY@$MANIFEST_DIGEST\` (tag \`$VERSION\`). The anonymous OCI layer is
+          byte-identical to \`memory-chat-provider.wasm\`; verify it with the attached SHA-256 file.
 
-          Requires Dekopon 0.11.1 broker-owned JSONL storage, opaque chat namespaces, broker-curated
-          limits, and invocation-level transaction commit/rollback. Direct runner cannot load it.
+          Requires Dekopon 0.13.0 broker-owned JSONL storage, opaque chat namespaces, and
+          broker-curated limits. Nothing outside a broker can supply the JSONL import.
           Recording remains hidden; retrieved text is untrusted and never automatically replayed.
           Changing provider bytes rotates authority-bound continuity. No latest or temporary tag is
           published. The binary distribution license expression is **MIT OR Apache-2.0**.
+
+          0.13.0 applies each storage call directly and has no invocation rollback: a record whose
+          second append is refused keeps the first one.
           EOF
           test "$(wc -c <"$RUNNER_TEMP/release-notes.md")" -le 125000
-          jq -n --rawfile body "$RUNNER_TEMP/release-notes.md" '{
+          jq -n --rawfile body "$RUNNER_TEMP/release-notes.md" --arg tag "$GITHUB_REF_NAME" '{
             draft: false,
             prerelease: false,
             make_latest: "false",
-            name: "v0.1.0",
+            name: $tag,
             body: $body
           }' >"$RUNNER_TEMP/publish.json"
 
           # Revalidate the complete public OCI and owned-draft cardinality immediately before the
           # final mutation. A concurrent extra tag, version, or run-owned draft must stop release.
-          test "$("${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort)" = \
-            "0.1.0"
+          "${anonymous[@]}" repo tags "$OCI_REPOSITORY" | LC_ALL=C sort >"$RUNNER_TEMP/oci-tags.txt"
+          grep -Fqx "$VERSION" "$RUNNER_TEMP/oci-tags.txt"
+          if grep -Eqx 'latest|staging|tmp|temp' "$RUNNER_TEMP/oci-tags.txt"; then
+            echo 'error: a mutable OCI tag exists' >&2
+            exit 1
+          fi
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = \
             "$MANIFEST_DIGEST"
           gh api --paginate \
             /orgs/dekopon-agents/packages/container/provider-memory-chat/versions?per_page=100 \
             >"$RUNNER_TEMP/final-versions.jsons"
-          jq -se --arg digest "$MANIFEST_DIGEST" '
+          jq -se --arg digest "$MANIFEST_DIGEST" --arg version "$VERSION" '
             [.[][]] as $versions |
-            ($versions | length) == 1 and
-            $versions[0].name == $digest and
-            (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
+            [$versions[] | select(.name == $digest)] as $owned |
+            ($owned | length) == 1 and
+            (($owned[0].metadata.container.tags // []) | sort) == [$version]
           ' "$RUNNER_TEMP/final-versions.jsons" >/dev/null
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-            jq -s --arg marker "$MARKER" --arg release_id "$RELEASE_ID" '
+            jq -s --arg marker "$MARKER" --arg release_id "$RELEASE_ID" \
+              --arg tag "$GITHUB_REF_NAME" '
               [.[][] | select(
-                .draft == true and .tag_name == "v0.1.0" and
+                .draft == true and .tag_name == $tag and
                 ((.body // "") | startswith($marker))
               )] |
               length == 1 and (.[0].id | tostring) == $release_id
@@ -537,8 +534,8 @@ jobs:
           # This PATCH is the release transaction's final mutation. Everything above is read-only.
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             --input "$RUNNER_TEMP/publish.json" >"$RUNNER_TEMP/published.json"
-          jq -e --arg marker "$MARKER" '
-            .draft == false and .tag_name == "v0.1.0" and
+          jq -e --arg marker "$MARKER" --arg tag "$GITHUB_REF_NAME" '
+            .draft == false and .tag_name == $tag and
             ((.body // "") | startswith($marker))
           ' "$RUNNER_TEMP/published.json" >/dev/null
 
@@ -571,7 +568,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          api="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0"
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"
           env -u GH_TOKEN -u GITHUB_TOKEN curl --fail --silent --show-error --location "$api" >"$RUNNER_TEMP/release.json"
           jq -e '.draft == false and .prerelease == false and ([.assets[].name] | sort) == ["memory-chat-provider.wasm","memory-chat-provider.wasm.sha256"]' "$RUNNER_TEMP/release.json" >/dev/null
           mkdir "$RUNNER_TEMP/public"
@@ -621,10 +618,14 @@ jobs:
           RELEASE_ID: ${{ needs.draft.outputs.release_id }}
           MARKER: ${{ needs.draft.outputs.marker }}
           EXPECTED_DIGEST: ${{ needs.ghcr.outputs.manifest_digest }}
+          VERSION: ${{ needs.build.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           run="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+          # The build job may not have produced a version; the tag names the same thing.
+          version=${VERSION:-${GITHUB_REF_NAME#v}}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           expected_marker="provider-memory-chat-run:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           [[ -z "$MARKER" || "$MARKER" == "$expected_marker" ]]
           [[ -z "$EXPECTED_DIGEST" || "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -641,16 +642,16 @@ jobs:
             gh api "$endpoint" >"$RUNNER_TEMP/release.json" 2>"$RUNNER_TEMP/release.err" || true
           else
             gh api --paginate "$endpoint" | jq -s 'add' >"$RUNNER_TEMP/releases.json"
-            jq --arg marker "$expected_marker" '
+            jq --arg marker "$expected_marker" --arg tag "$GITHUB_REF_NAME" '
               [.[] | select(
-                .tag_name == "v0.1.0" and ((.body // "") | startswith($marker))
+                .tag_name == $tag and ((.body // "") | startswith($marker))
               )] |
               if length == 1 then .[0] elif length == 0 then null
               else error("multiple run-owned releases") end
             ' "$RUNNER_TEMP/releases.json" >"$RUNNER_TEMP/release.json"
           fi
-          if jq -e --arg marker "$expected_marker" '
-            . != null and .tag_name == "v0.1.0" and
+          if jq -e --arg marker "$expected_marker" --arg tag "$GITHUB_REF_NAME" '
+            . != null and .tag_name == $tag and
             ((.body // "") | startswith($marker))
           ' "$RUNNER_TEMP/release.json" >/dev/null 2>&1; then
             release_owned=true
@@ -659,7 +660,7 @@ jobs:
               "$RUNNER_TEMP/release.json" >/dev/null
           fi
 
-          ref="$OCI_REPOSITORY:0.1.0"
+          ref="$OCI_REPOSITORY:$version"
           digest=
           if descriptor=$("$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
             2>"$RUNNER_TEMP/descriptor.err"); then
@@ -668,12 +669,12 @@ jobs:
             [[ -z "$EXPECTED_DIGEST" || "$digest" == "$EXPECTED_DIGEST" ]]
             "$RUNNER_TEMP/oras" manifest fetch "$OCI_REPOSITORY@$digest" \
               >"$RUNNER_TEMP/owned-manifest.json"
-            jq -e --arg run "$run" --arg revision "$GITHUB_SHA" '
+            jq -e --arg run "$run" --arg revision "$GITHUB_SHA" --arg version "$version" '
               .artifactType == "application/vnd.dekopon.provider.v1+wasm" and
               .annotations["org.dekopon.release.run"] == $run and
               .annotations["org.opencontainers.image.source"] ==
                 "https://github.com/dekopon-agents/dekopon-provider-memory-chat" and
-              .annotations["org.opencontainers.image.version"] == "0.1.0" and
+              .annotations["org.opencontainers.image.version"] == $version and
               .annotations["org.opencontainers.image.revision"] == $revision and
               .annotations["org.opencontainers.image.licenses"] ==
                 "MIT OR Apache-2.0" and
@@ -683,22 +684,33 @@ jobs:
             gh api --paginate \
               /orgs/dekopon-agents/packages/container/provider-memory-chat/versions?per_page=100 \
               >"$RUNNER_TEMP/cleanup-versions.jsons"
-            jq -se --arg digest "$digest" '
+            # Prove this run owns exactly one package version, tagged only with this release's
+            # version, before deleting anything. Every earlier release's version is left alone.
+            owned=$(jq -se --arg digest "$digest" --arg version "$version" '
               [.[][]] as $versions |
-              ($versions | length) == 1 and
-              $versions[0].name == $digest and
-              (($versions[0].metadata.container.tags // []) | sort) == ["0.1.0"]
-            ' "$RUNNER_TEMP/cleanup-versions.jsons" >/dev/null
+              [$versions[] | select(.name == $digest)] as $owned |
+              if ($owned | length) == 1 and
+                 (($owned[0].metadata.container.tags // []) | sort) == [$version]
+              then "\($owned[0].id) \($versions | length)"
+              else error("run-owned package version cardinality") end
+            ' "$RUNNER_TEMP/cleanup-versions.jsons")
+            read -r version_id version_total <<<"$owned"
+            [[ "$version_id" =~ ^[0-9]+$ && "$version_total" =~ ^[0-9]+$ ]]
             package=$(gh api \
               /orgs/dekopon-agents/packages/container/provider-memory-chat)
             jq -e '
               .name == "provider-memory-chat" and .package_type == "container" and
               (.visibility == "private" or .visibility == "public")
             ' <<<"$package" >/dev/null
-            # GitHub refuses deletion of the sole tagged version. After proving this run owns the
-            # package's only manifest/version, delete the whole previously absent package.
-            gh api --method DELETE \
-              /orgs/dekopon-agents/packages/container/provider-memory-chat
+            if (( version_total > 1 )); then
+              gh api --method DELETE \
+                "/orgs/dekopon-agents/packages/container/provider-memory-chat/versions/$version_id"
+            else
+              # GitHub refuses deletion of the sole tagged version. This run put the package's only
+              # manifest there, so remove the package this run created.
+              gh api --method DELETE \
+                /orgs/dekopon-agents/packages/container/provider-memory-chat
+            fi
             if "$RUNNER_TEMP/oras" manifest fetch --descriptor "$ref" \
               >/dev/null 2>"$RUNNER_TEMP/deleted.err"; then
               # Registry deletion is eventually consistent; the bounded absence poll below owns
@@ -737,7 +749,7 @@ jobs:
               release_id_absent=false
             fi
             release_tag_absent=false
-            if api_absent "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" \
+            if api_absent "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
               cleanup-release-tag; then
               release_tag_absent=true
             fi
@@ -752,14 +764,28 @@ jobs:
               cat "$RUNNER_TEMP/cleanup-oci.err" >&2
               exit 1
             fi
-            package_absent=false
+            # This run's manifest must be gone from the package. Earlier releases keep theirs,
+            # so an absent package and a package without this digest are both success.
+            version_absent=false
             if api_absent \
               /orgs/dekopon-agents/packages/container/provider-memory-chat \
               cleanup-package; then
-              package_absent=true
+              version_absent=true
+            elif [[ -z "$digest" ]]; then
+              version_absent=true
+            elif gh api --paginate \
+              /orgs/dekopon-agents/packages/container/provider-memory-chat/versions?per_page=100 \
+              >"$RUNNER_TEMP/cleanup-remaining.jsons" 2>/dev/null; then
+              # A digest still listed means deletion has not propagated; poll again rather than
+              # letting the non-zero jq end the branch and trip errexit.
+              if jq -se --arg digest "$digest" \
+                '[.[][] | select(.name == $digest)] | length == 0' \
+                "$RUNNER_TEMP/cleanup-remaining.jsons" >/dev/null; then
+                version_absent=true
+              fi
             fi
             if [[ "$release_id_absent" == true && "$release_tag_absent" == true && \
-                  "$oci_absent" == true && "$package_absent" == true ]]; then
+                  "$oci_absent" == true && "$version_absent" == true ]]; then
               restored=true
               break
             fi

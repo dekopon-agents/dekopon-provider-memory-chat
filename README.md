@@ -4,21 +4,21 @@ A standalone broker-only WebAssembly component implementing hidden `memory.chat.
 
 ## Authority and privacy boundary
 
-The provider owns JSON encoding, bounded retrieval, literal Unicode-lowercase search, deduplication, and compaction for the logical names `turns.jsonl` and `dedup.jsonl`. It does **not** own authorization, authenticated chat identity, namespaces, grants, quotas, transaction commit, retention policy, or storage paths. Those remain broker/storage-host responsibilities.
+The provider owns JSON encoding, bounded retrieval, literal Unicode-lowercase search, deduplication, and compaction for the logical names `turns.jsonl` and `dedup.jsonl`. It does **not** own authorization, authenticated chat identity, namespaces, grants, quotas, retention policy, or storage paths. Those remain broker/storage-host responsibilities.
 
 `memory.chat.record` is intentionally absent from command resolution and its advertised schema is an empty closed object. Only the broker's hidden post-acceptance route may supply its curated record fields. Retrieved text is untrusted content: it is never identity, policy input, or automatically replayed prompt context. Storage telemetry must not expose turn content or identifying namespace material.
 
-The storage host must bind each invocation to a broker-authorized JSONL grant and opaque chat namespace. Guest `append` and `replace` calls are provisional operations in one invocation transaction: the host commits them only after a valid successful provider response and rolls all of them back on failure. Individual WIT calls are not durability boundaries.
+The storage host must bind each invocation to a broker-authorized JSONL grant and opaque chat namespace. As of Dekopon 0.13.0 each guest `append` and `replace` is applied by the host when it is called; there is no invocation transaction and no rollback. A record whose dedup append is refused keeps the turn append that already completed, and the provider reports the refusal rather than pretending the write did not happen.
 
 ## Exact capabilities
 
-| Capability | Effect | Risk | Idempotency |
-|---|---|---|---|
-| `memory.chat.record` | local-write | Medium | conditional |
-| `memory.chat.recent` | read-only | High | idempotent |
-| `memory.chat.search` | read-only | High | idempotent |
+| Capability | Effect | Risk |
+|---|---|---|
+| `memory.chat.record` | local-write | Medium |
+| `memory.chat.recent` | read-only | High |
+| `memory.chat.search` | read-only | High |
 
-The only command word is `memory`, resolving `memory recent --last N` and `memory search --query TEXT`. Record never resolves from a command.
+The only command word is `memory`. It behaves like a command-line program through the `run-command` export: `memory --help` renders a help page on standard output at status 0, `memory recent --last N` and `memory search --query TEXT` propose their capability, `memory search -` takes the query from the value piped into the word, and any other argv renders a usage error on standard error at status 2. Record never runs from a command.
 
 ## Durable format and bounds
 
@@ -30,19 +30,19 @@ All operational ceilings (`maxTurnBytes`, lookback/result/dedup limits, and comp
 
 ## Run and deployment
 
-Direct `dekopon-run invoke` cannot load this imported component and must reject it. Install it only in a Dekopon 0.11.1 broker with broker-owned JSONL storage, namespace derivation, limits, and transaction support. Authority-bound continuity intentionally rotates when provider bytes or effective authority change; explicit stable continuity preserves addressing while each operation is still freshly authorized.
+Nothing outside a broker can supply the JSONL import: an empty Wasmtime linker refuses to instantiate the component. Install it only in a Dekopon 0.13.0 broker with broker-owned JSONL storage, namespace derivation, and limits. Authority-bound continuity intentionally rotates when provider bytes or effective authority change; explicit stable continuity preserves addressing while each operation is still freshly authorized.
 
-When v0.1.0 is released, GitHub contains exactly `memory-chat-provider.wasm` and its `.sha256`. Identical Wasm bytes are the sole `application/wasm` layer at `ghcr.io/dekopon-agents/provider-memory-chat:0.1.0`; no `latest` tag is published.
+Each release puts exactly `memory-chat-provider.wasm` and its `.sha256` on GitHub. Identical Wasm bytes are the sole `application/wasm` layer at `ghcr.io/dekopon-agents/provider-memory-chat:<version>`; no `latest` tag is published.
 
 ## Build and validation
 
 Generated Wasm is ignored and must never be committed. Each checkout uses its ordinary `target/` and the machine's configured global compiler cache.
 
 ```console
-rustup toolchain install 1.89.0 --profile minimal
-rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
-rustup target add wasm32-unknown-unknown --toolchain 1.97.0
-cargo +1.97.0 install wasm-tools --version 1.236.1 --locked
+rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+rustup target add wasm32-unknown-unknown --toolchain 1.98.1
+cargo +1.98.1 install wasm-tools --version 1.259.0 --locked
+cargo +1.98.1 install wasmtime-cli --version 48.0.2 --locked
 ./scripts/validate.sh
 ./scripts/reproducible-build.sh
 ```
