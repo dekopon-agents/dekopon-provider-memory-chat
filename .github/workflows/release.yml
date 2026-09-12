@@ -776,8 +776,13 @@ jobs:
             elif gh api --paginate \
               /orgs/dekopon-agents/packages/container/provider-memory-chat/versions?per_page=100 \
               >"$RUNNER_TEMP/cleanup-remaining.jsons" 2>/dev/null; then
-              jq -se --arg digest "$digest" '[.[][] | select(.name == $digest)] | length == 0' \
-                "$RUNNER_TEMP/cleanup-remaining.jsons" >/dev/null && version_absent=true
+              # A digest still listed means deletion has not propagated; poll again rather than
+              # letting the non-zero jq end the branch and trip errexit.
+              if jq -se --arg digest "$digest" \
+                '[.[][] | select(.name == $digest)] | length == 0' \
+                "$RUNNER_TEMP/cleanup-remaining.jsons" >/dev/null; then
+                version_absent=true
+              fi
             fi
             if [[ "$release_id_absent" == true && "$release_tag_absent" == true && \
                   "$oci_absent" == true && "$version_absent" == true ]]; then
