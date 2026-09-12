@@ -336,7 +336,7 @@ jobs:
           "$RUNNER_TEMP/oras-bin" manifest fetch "$OCI_REPOSITORY@$digest" \
             >"$RUNNER_TEMP/authenticated-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/authenticated-manifest.json" \
-            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA"
+            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA" "$VERSION"
 
           for _ in {1..30}; do
             visibility=$(gh api /orgs/dekopon-agents/packages/container/provider-memory-chat \
@@ -356,7 +356,7 @@ jobs:
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$digest"
           "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/anonymous-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/anonymous-manifest.json" \
-            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA"
+            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA" "$VERSION"
           mkdir "$RUNNER_TEMP/anonymous-pull"
           "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/anonymous-pull"
           test "$(find "$RUNNER_TEMP/anonymous-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
@@ -470,7 +470,7 @@ jobs:
           test "$("${anonymous[@]}" manifest fetch --descriptor "$ref" | jq -er .digest)" = "$MANIFEST_DIGEST"
           "${anonymous[@]}" manifest fetch "$ref" >"$RUNNER_TEMP/final-manifest.json"
           ./scripts/verify-oci-manifest.py "$RUNNER_TEMP/final-manifest.json" \
-            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA"
+            dist/memory-chat-provider.wasm "$run" "$GITHUB_SHA" "$VERSION"
           mkdir "$RUNNER_TEMP/final-pull"
           "${anonymous[@]}" pull "$ref" --output "$RUNNER_TEMP/final-pull"
           test "$(find "$RUNNER_TEMP/final-pull" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1

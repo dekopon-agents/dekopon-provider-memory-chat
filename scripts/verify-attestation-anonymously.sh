@@ -35,7 +35,7 @@ for _attempt in {1..12}; do
     --output "$response" --write-out '%{http_code}' \
     --header 'Accept: application/vnd.github+json' \
     --header 'X-GitHub-Api-Version: 2022-11-28' \
-    --user-agent 'dekopon-provider-memory-chat-anonymous-verifier/0.1.0' \
+    --user-agent 'dekopon-provider-memory-chat-anonymous-verifier' \
     --data-urlencode "predicate_type=$predicate" \
     "$api/repos/$repo/attestations/sha256:$digest")
   if [[ "$status" == 200 ]]; then
