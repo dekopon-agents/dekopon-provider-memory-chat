@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use dekopon_provider_sdk_testkit::{FakeBroker, StorageAccess, StorageInterface, StorageLimits};
+use dekopon_provider_sdk_testkit::{
+    CommandRunOutcome, FakeBroker, FakeBrokerError, StorageAccess, StorageInterface, StorageLimits,
+};
 use serde_json::{Value, json};
 
 fn component() -> PathBuf {
@@ -91,6 +93,27 @@ fn search(query: &str, maximum: u32, max_result_bytes: u64) -> Value {
     })
 }
 
+/// Whether the failure carries the storage evidence a namespace-touching invocation records.
+///
+/// `FakeBrokerError::storage_evidence` was deleted from the testkit in 0.13.0 as unreferenced
+/// public surface; the field it read is still public, so this repository keeps the one line it
+/// needs rather than pinning an older testkit.
+fn storage_was_reached(error: &FakeBrokerError) -> bool {
+    matches!(error, FakeBrokerError::Invocation(failure) if failure.storage.is_some())
+}
+
+async fn run(broker: &FakeBroker, argv: &[&str], stdin: Option<&str>) -> Value {
+    let argv = argv
+        .iter()
+        .map(|word| (*word).to_owned())
+        .collect::<Vec<_>>();
+    let outcome: CommandRunOutcome = broker
+        .run_command("memory", &argv, stdin)
+        .await
+        .expect("the memory word runs through the component");
+    serde_json::to_value(outcome).expect("command run JSON")
+}
+
 async fn broker() -> FakeBroker {
     FakeBroker::builder()
         .component(component())
@@ -102,7 +125,7 @@ async fn broker() -> FakeBroker {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn checked_component_manifest_and_command_resolution_are_exact() {
+async fn checked_component_manifest_and_command_runs_are_exact() {
     let broker = broker().await;
     let manifests = broker.registry().manifests().collect::<Vec<_>>();
     assert_eq!(manifests.len(), 1);
@@ -119,7 +142,6 @@ async fn checked_component_manifest_and_command_resolution_are_exact() {
                     "description": "Records one gateway-attested transport-accepted turn",
                     "effect": "local-write",
                     "risk": "Medium",
-                    "idempotency": "conditional",
                     "inputSchema": {"type":"object","additionalProperties":false}
                 },
                 {
@@ -127,7 +149,6 @@ async fn checked_component_manifest_and_command_resolution_are_exact() {
                     "description": "Returns recent durable turns in chronological order",
                     "effect": "read-only",
                     "risk": "High",
-                    "idempotency": "idempotent",
                     "inputSchema": {
                         "type":"object",
                         "properties":{"last":{"type":"integer","minimum":1}},
@@ -140,7 +161,6 @@ async fn checked_component_manifest_and_command_resolution_are_exact() {
                     "description": "Searches recent durable turns with literal case-insensitive matching",
                     "effect": "read-only",
                     "risk": "High",
-                    "idempotency": "idempotent",
                     "inputSchema": {
                         "type":"object",
                         "properties":{"query":{"type":"string","minLength":1}},
@@ -152,52 +172,67 @@ async fn checked_component_manifest_and_command_resolution_are_exact() {
         })
     );
 
-    let recent = broker
-        .registry()
-        .resolve_command("memory", &["recent".into(), "--last".into(), "3".into()])
-        .await
-        .expect("recent command resolves through component");
+    let recent = run(&broker, &["recent", "--last", "3"], None).await;
     assert_eq!(
-        serde_json::to_value(recent).expect("recent resolution JSON"),
+        recent,
         json!({
-            "outcome": "resolved",
+            "outcome": "proposed",
             "capability": "memory.chat.recent",
             "input": {"last": 3}
         })
     );
 
-    let search = broker
-        .registry()
-        .resolve_command(
-            "memory",
-            &["search".into(), "--query".into(), "needle".into()],
-        )
-        .await
-        .expect("search command resolves through component");
+    let search = run(&broker, &["search", "--query", "needle"], None).await;
     assert_eq!(
-        serde_json::to_value(search).expect("search resolution JSON"),
+        search,
         json!({
-            "outcome": "resolved",
+            "outcome": "proposed",
             "capability": "memory.chat.search",
             "input": {"query": "needle"}
         })
     );
 
-    let record = broker
-        .registry()
-        .resolve_command("memory", &["record".into()])
-        .await
-        .expect("record is declined by the component");
+    // The host carries the piped value only for a `run-command` guest; a legacy rewrite never
+    // received one. Reaching the capability through it is what proves the new export is live.
+    let piped = run(&broker, &["search", "-"], Some(" piped needle \n")).await;
     assert_eq!(
-        serde_json::to_value(record).expect("record resolution JSON"),
+        piped,
         json!({
-            "outcome": "failed",
-            "error": {
-                "code": "usage",
-                "message": "usage: memory recent --last N | memory search --query TEXT"
-            }
+            "outcome": "proposed",
+            "capability": "memory.chat.search",
+            "input": {"query": "piped needle"}
         })
     );
+
+    let help = run(&broker, &["--help"], None).await;
+    assert_eq!(help["outcome"], "rendered");
+    assert_eq!(help["status"], 0);
+    assert_eq!(help["stderr"], "");
+    let page = help["stdout"].as_str().expect("help page");
+    assert!(
+        page.starts_with("Usage: memory recent --last N\n"),
+        "{page}"
+    );
+    assert!(page.contains("memory search -\n"), "{page}");
+
+    for (argv, stdin, stderr) in [
+        (
+            &["record"][..],
+            None,
+            "memory: unrecognized arguments; try `memory --help`\n",
+        ),
+        (
+            &["search", "-"][..],
+            None,
+            "memory search -: nothing was piped in\n",
+        ),
+    ] {
+        assert_eq!(
+            run(&broker, argv, stdin).await,
+            json!({"outcome": "rendered", "stdout": "", "stderr": stderr, "status": 2}),
+            "{argv:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -305,8 +340,12 @@ async fn namespaces_and_storage_access_are_host_owned() {
     );
 }
 
+/// Dekopon 0.13.0 applies each storage call directly and has no invocation rollback, so a record
+/// whose dedup append is refused keeps the turn append that already completed. The provider is
+/// still fail-closed on the operation — it reports the refusal and writes no dedup line — but the
+/// turn log is not restored, and a later `recent` sees it.
 #[tokio::test(flavor = "multi_thread")]
-async fn failed_second_append_rolls_back_the_whole_invocation() {
+async fn a_refused_second_append_keeps_the_completed_first_one() {
     let limits = StorageLimits {
         max_write_bytes_per_call: 220,
         max_write_bytes_per_invocation: 220,
@@ -329,21 +368,19 @@ async fn failed_second_append_rolls_back_the_whole_invocation() {
         .await
         .expect_err("cumulative quota rejects the later dedup append");
     assert!(
-        failure.storage_evidence().is_some(),
-        "the transaction started: {failure}"
+        storage_was_reached(&failure),
+        "the namespace was reached: {failure}"
     );
     let after = broker
         .invoke("memory.chat.recent", recent(1, 65_536))
         .await
-        .expect("reads remain available after rollback");
-    assert!(
-        after["turns"].as_array().unwrap().is_empty(),
-        "turn append was provisional"
-    );
+        .expect("reads remain available after the refusal");
+    assert_eq!(after["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(after["turns"][0]["id"], "rollback");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn size_read_and_replace_host_failures_are_terminal_and_transactional() {
+async fn size_read_and_replace_host_failures_are_terminal() {
     let size_limited = FakeBroker::builder()
         .component(component())
         .provider("memory-chat")
@@ -414,12 +451,13 @@ async fn size_read_and_replace_host_failures_are_terminal_and_transactional() {
         .invoke("memory.chat.record", compacting)
         .await
         .expect_err("replacement exceeds cumulative write quota after both appends");
-    assert!(replace_failure.storage_evidence().is_some());
+    assert!(storage_was_reached(&replace_failure));
     let after = replace_limited
         .invoke("memory.chat.recent", recent(1, 65_536))
         .await
-        .expect("failed replacement rolls back both provisional appends");
-    assert!(after["turns"].as_array().unwrap().is_empty());
+        .expect("reads remain available after the refused replacement");
+    assert_eq!(after["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(after["turns"][0]["id"], "replace-failure");
 }
 
 #[tokio::test(flavor = "multi_thread")]

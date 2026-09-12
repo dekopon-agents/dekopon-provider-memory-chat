@@ -11,7 +11,7 @@ wasm-tools component wit "$component" >"$text"
 if [[ -f "$core" ]]; then wasm-tools print "$core" >"$core_text"; else : >"$core_text"; fi
 jq -e '
   (.worlds | length) == 1 and (.interfaces | length) == 1 and
-  ((.worlds[0].exports | keys | sort) == ["describe","invoke","resolve-command"]) and
+  ((.worlds[0].exports | keys | sort) == ["describe","invoke","run-command"]) and
   ((.worlds[0].imports | length) == 1) and
   (.interfaces[0].name == "jsonl") and
   ((.interfaces[0].functions | keys | sort) == ["append","read-chunk","replace","size"]) and
@@ -29,4 +29,4 @@ if grep -Eqi 'wasi:|wasix|wasi_snapshot|dekopon:http|durable-files|filesystem|en
   echo 'error: forbidden ambient or non-JSONL import found' >&2; exit 1
 fi
 size=$(wc -c <"$component" | tr -d ' '); ((size <= 1000000))
-printf 'verified %s bytes: only JSONL@0.1.0; three provider exports; no WASI/HTTP/ambient imports\n' "$size"
+printf 'verified %s bytes: only JSONL@0.1.0; describe/invoke/run-command; no WASI/HTTP/ambient imports\n' "$size"

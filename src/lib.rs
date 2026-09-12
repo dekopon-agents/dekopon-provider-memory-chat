@@ -1,6 +1,6 @@
 use dekopon_provider_sdk::{
-    CapabilityId, CommandInvocation, EffectKind, Idempotency, Provider, ProviderApiVersion,
-    ProviderCapability, ProviderError, ProviderManifest, RiskLevel,
+    CapabilityId, CommandRun, EffectKind, Provider, ProviderApiVersion, ProviderCapability,
+    ProviderError, ProviderManifest, RiskLevel,
 };
 use dekopon_provider_storage::jsonl::{self, StorageError};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,32 @@ use serde_json::{Value, json};
 const TURNS: &str = "turns.jsonl";
 const DEDUP: &str = "dedup.jsonl";
 const CHUNK: u32 = 256 * 1024;
-const USAGE: &str = "usage: memory recent --last N | memory search --query TEXT";
+/// The three capability identifiers, read by both `manifest` and `run_command` so renaming one
+/// is a compile error rather than an exit code a model discovers mid-session.
+const RECORD: &str = "memory.chat.record";
+const RECENT: &str = "memory.chat.recent";
+const SEARCH: &str = "memory.chat.search";
+
+/// The hand-written help page; there is no argument parser to render one.
+const HELP: &str = "Usage: memory recent --last N\n\
+\x20      memory search --query TEXT\n\
+\x20      memory search -\n\
+\n\
+Reads durable chat memory. Recording is hidden and never runs from a command.\n\
+\n\
+Commands:\n\
+\x20 recent --last N       Propose the newest N turns\n\
+\x20 search --query TEXT   Propose a literal case-insensitive search\n\
+\x20 search -              Read the query from the piped value\n\
+\n\
+Options:\n\
+\x20     --help            Print help\n";
+
+/// Standard error for an argv the word does not accept.
+const USAGE: &str = "memory: unrecognized arguments; try `memory --help`\n";
+
+/// Standard error for `memory search -` with nothing piped into the word.
+const NO_STDIN: &str = "memory search -: nothing was piped in\n";
 
 mod bindings {
     wit_bindgen::generate!({
@@ -85,19 +110,17 @@ impl Provider for MemoryChat {
             command_words: vec!["memory".to_owned()],
             capabilities: vec![
                 capability(
-                    "memory.chat.record",
+                    RECORD,
                     "Records one gateway-attested transport-accepted turn",
                     EffectKind::LocalWrite,
                     RiskLevel::Medium,
-                    Idempotency::Conditional,
                     json!({"type":"object","additionalProperties":false}),
                 ),
                 capability(
-                    "memory.chat.recent",
+                    RECENT,
                     "Returns recent durable turns in chronological order",
                     EffectKind::ReadOnly,
                     RiskLevel::High,
-                    Idempotency::Idempotent,
                     json!({
                         "type":"object",
                         "properties":{"last":{"type":"integer","minimum":1}},
@@ -105,11 +128,10 @@ impl Provider for MemoryChat {
                     }),
                 ),
                 capability(
-                    "memory.chat.search",
+                    SEARCH,
                     "Searches recent durable turns with literal case-insensitive matching",
                     EffectKind::ReadOnly,
                     RiskLevel::High,
-                    Idempotency::Idempotent,
                     json!({
                         "type":"object",
                         "properties":{"query":{"type":"string","minLength":1}},
@@ -124,7 +146,7 @@ impl Provider for MemoryChat {
         let input: Input = serde_json::from_value(input).map_err(|_| invalid())?;
         match (capability.as_str(), input) {
             (
-                "memory.chat.record",
+                RECORD,
                 Input::Record {
                     id,
                     commitment,
@@ -150,7 +172,7 @@ impl Provider for MemoryChat {
                 compaction_threshold_bytes,
             }),
             (
-                "memory.chat.recent",
+                RECENT,
                 Input::Recent {
                     last,
                     max_lookback_turns,
@@ -165,7 +187,7 @@ impl Provider for MemoryChat {
                 bounded_result(&turns, last as usize, max_result_bytes)
             }
             (
-                "memory.chat.search",
+                SEARCH,
                 Input::Search {
                     query,
                     max_lookback_turns,
@@ -194,30 +216,39 @@ impl Provider for MemoryChat {
         }
     }
 
-    fn resolve_command(argv: &[String]) -> Result<CommandInvocation, ProviderError> {
+    /// Hand-rolled on purpose: match on the argv slice and shift values out by hand, so the word
+    /// needs no argument parser and no extra feature flag. `--help` renders on standard output at
+    /// status 0, an argv the word does not accept renders on standard error at status 2, and
+    /// everything else proposes exactly the capability the legacy rewrite proposed. Recording is
+    /// hidden and has no command form.
+    fn run_command(argv: &[String], stdin: Option<&str>) -> Result<CommandRun, ProviderError> {
         match argv {
+            [flag] if flag == "--help" => Ok(CommandRun::rendered(HELP, 0)),
             [operation, flag, last] if operation == "recent" && flag == "--last" => {
-                let last = last
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .ok_or_else(usage)?;
-                Ok(CommandInvocation {
-                    capability: "memory.chat.recent".parse().expect("static capability"),
-                    input: json!({"last": last}),
-                })
+                match last.parse::<u64>().ok().filter(|value| *value > 0) {
+                    Some(last) => Ok(proposal(RECENT, json!({"last": last}))),
+                    None => Ok(CommandRun::rendered_error(USAGE, 2)),
+                }
             }
             [operation, flag, query]
                 if operation == "search" && flag == "--query" && !query.is_empty() =>
             {
-                Ok(CommandInvocation {
-                    capability: "memory.chat.search".parse().expect("static capability"),
-                    input: json!({"query": query}),
-                })
+                Ok(proposal(SEARCH, json!({"query": query})))
             }
-            _ => Err(usage()),
+            // The piped value is the query, so a shell can search for text it never has to quote.
+            [operation, dash] if operation == "search" && dash == "-" => {
+                match stdin.map(str::trim).filter(|query| !query.is_empty()) {
+                    Some(query) => Ok(proposal(SEARCH, json!({"query": query}))),
+                    None => Ok(CommandRun::rendered_error(NO_STDIN, 2)),
+                }
+            }
+            _ => Ok(CommandRun::rendered_error(USAGE, 2)),
         }
     }
+}
+
+fn proposal(capability: &str, input: Value) -> CommandRun {
+    CommandRun::proposal(capability.parse().expect("static capability"), input)
 }
 
 fn capability(
@@ -225,7 +256,6 @@ fn capability(
     description: &str,
     effect: EffectKind,
     risk: RiskLevel,
-    idempotency: Idempotency,
     input_schema: Value,
 ) -> ProviderCapability {
     ProviderCapability {
@@ -233,7 +263,6 @@ fn capability(
         description: description.to_owned(),
         effect,
         risk,
-        idempotency,
         input_schema,
     }
 }
@@ -494,17 +523,20 @@ fn corrupt() -> ProviderError {
 fn invalid() -> ProviderError {
     ProviderError::new("invalid-input", "memory input is invalid")
 }
-fn usage() -> ProviderError {
-    ProviderError::new("usage", USAGE)
-}
-
-dekopon_provider_sdk::export_provider_with_commands!(MemoryChat, bindings);
+dekopon_provider_sdk::export_provider_with_cli!(MemoryChat, bindings);
 
 #[cfg(test)]
 mod tests {
+    use dekopon_provider_sdk::CommandRun;
+
     use super::{
-        MemoryChat, Provider, Turn, USAGE, bounded_refs, compact, join_lines, parse_lines,
+        HELP, MemoryChat, NO_STDIN, Provider, RECENT, SEARCH, Turn, USAGE, bounded_refs, compact,
+        join_lines, parse_lines,
     };
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
 
     fn turn(id: &str, text: &str) -> Turn {
         Turn {
@@ -533,7 +565,6 @@ mod tests {
                         "description": "Records one gateway-attested transport-accepted turn",
                         "effect": "local-write",
                         "risk": "Medium",
-                        "idempotency": "conditional",
                         "inputSchema": {"type":"object","additionalProperties":false}
                     },
                     {
@@ -541,7 +572,6 @@ mod tests {
                         "description": "Returns recent durable turns in chronological order",
                         "effect": "read-only",
                         "risk": "High",
-                        "idempotency": "idempotent",
                         "inputSchema": {
                             "type":"object",
                             "properties":{"last":{"type":"integer","minimum":1}},
@@ -554,7 +584,6 @@ mod tests {
                         "description": "Searches recent durable turns with literal case-insensitive matching",
                         "effect": "read-only",
                         "risk": "High",
-                        "idempotency": "idempotent",
                         "inputSchema": {
                             "type":"object",
                             "properties":{"query":{"type":"string","minLength":1}},
@@ -565,12 +594,70 @@ mod tests {
                 ]
             })
         );
-        assert!(
-            MemoryChat::resolve_command(&["record".into()])
-                .expect_err("record never resolves")
-                .message()
-                .contains(USAGE)
+        assert_eq!(
+            MemoryChat::run_command(&argv(&["record"]), None)
+                .expect("record renders a usage error"),
+            CommandRun::rendered_error(USAGE, 2)
         );
+    }
+
+    #[test]
+    fn help_renders_the_hand_written_page_on_stdout_at_status_zero() {
+        assert_eq!(
+            MemoryChat::run_command(&argv(&["--help"]), None).expect("help is rendered"),
+            CommandRun::rendered(HELP, 0)
+        );
+        assert!(!HELP.contains('\u{1b}'), "plain, never coloured");
+    }
+
+    #[test]
+    fn every_reading_argv_proposes_exactly_what_the_rewrite_proposed() {
+        for (words, stdin, capability, input) in [
+            (
+                &["recent", "--last", "3"][..],
+                None,
+                RECENT,
+                serde_json::json!({"last": 3}),
+            ),
+            (
+                &["search", "--query", "needle"][..],
+                None,
+                SEARCH,
+                serde_json::json!({"query": "needle"}),
+            ),
+            (
+                &["search", "-"][..],
+                Some(" piped needle \n"),
+                SEARCH,
+                serde_json::json!({"query": "piped needle"}),
+            ),
+        ] {
+            assert_eq!(
+                MemoryChat::run_command(&argv(words), stdin).expect("the word proposes"),
+                CommandRun::proposal(capability.parse().expect("static capability"), input),
+                "{words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_refused_argv_renders_on_stderr_at_status_two() {
+        for (words, stdin, expected) in [
+            (&["recent", "--last", "0"][..], None, USAGE),
+            (&["recent", "--last", "many"][..], None, USAGE),
+            (&["search", "--query", ""][..], None, USAGE),
+            (&["search"][..], None, USAGE),
+            (&["--version"][..], None, USAGE),
+            (&[][..], None, USAGE),
+            (&["search", "-"][..], None, NO_STDIN),
+            (&["search", "-"][..], Some("   \n"), NO_STDIN),
+        ] {
+            assert_eq!(
+                MemoryChat::run_command(&argv(words), stdin).expect("a usage error is rendered"),
+                CommandRun::rendered_error(expected, 2),
+                "{words:?}"
+            );
+        }
     }
 
     #[test]

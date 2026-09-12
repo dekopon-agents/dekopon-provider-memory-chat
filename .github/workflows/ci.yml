@@ -8,13 +8,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 env:
-  PROVIDER_MSRV: "1.89.0"
-  PROVIDER_RUST: "1.97.0"
-  WASM_TOOLS_VERSION: "1.236.1"
+  PROVIDER_RUST: "1.98.1"
+  WASM_TOOLS_VERSION: "1.259.0"
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_CYCLONEDX_VERSION: "0.5.9"
-  DEKOPON_RUN_VERSION: "0.11.1"
-  WASMTIME_VERSION: "48.0.0"
+  WASMTIME_VERSION: "48.0.2"
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 jobs:
@@ -31,7 +29,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install "$PROVIDER_MSRV" --profile minimal
           rustup toolchain install "$PROVIDER_RUST" --profile minimal --component clippy --component rustfmt
           rustup target add wasm32-unknown-unknown --toolchain "$PROVIDER_RUST"
           cargo +"$PROVIDER_RUST" install cargo-deny --version "$CARGO_DENY_VERSION" --locked
@@ -41,7 +38,7 @@ jobs:
           echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
           sudo install -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
-      - name: Compare caller-owned WIT with immutable v0.11.1
+      - name: Compare caller-owned WIT with immutable v0.13.0
         run: ./scripts/assert-wit-sources.sh --fetch
       - name: Run source, native, MSRV, license, and workflow gates
         run: ./scripts/validate-source.sh
@@ -62,16 +59,15 @@ jobs:
           rustup toolchain install "$PROVIDER_RUST" --profile minimal
           rustup target add wasm32-unknown-unknown --toolchain "$PROVIDER_RUST"
           cargo +"$PROVIDER_RUST" install wasm-tools --version "$WASM_TOOLS_VERSION" --locked
-          cargo +"$PROVIDER_RUST" install dekopon-run --version "$DEKOPON_RUN_VERSION" --locked
           cargo +"$PROVIDER_RUST" install wasmtime-cli --version "$WASMTIME_VERSION" --locked
       - name: Build and inspect exact JSONL-only component
         run: ./scripts/build-component.sh && ./scripts/inspect-component.sh
       - name: Run direct refusal and real broker/storage tests
         run: |
           ./scripts/test-direct-refusal.sh
-          cargo +1.97.0 test --locked --test broker -- --nocapture
+          cargo +"$PROVIDER_RUST" test --locked --test broker -- --nocapture
       - name: Verify exact release layout
-        run: ./scripts/prepare-release-assets.sh 0.1.0 "$PWD/dist"
+        run: ./scripts/prepare-release-assets.sh "" "$PWD/dist"
       - name: Upload ignored review bytes
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

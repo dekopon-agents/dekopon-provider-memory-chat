@@ -4,9 +4,11 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 component=${1:-"$root/memory-chat-provider.wasm"}
 core="$root/target/wasm32-unknown-unknown/release/dekopon_memory_chat_provider.wasm"
-toolchain=1.97.0
-required_rustc='rustc 1.97.0 (2d8144b78 2026-07-07)'
-required_wasm_tools='wasm-tools 1.236.1'
+toolchain=1.98.1
+required_rustc='rustc 1.98.1 (48a229cea 2026-09-01)'
+required_wasm_tools='wasm-tools 1.259.0'
+version=$(awk -F'"' '/^version = /{print $2; exit}' "$root/Cargo.toml")
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'error: no package version in Cargo.toml' >&2; exit 1; }
 [[ -z "${CARGO_TARGET_DIR-}" ]] || { echo 'error: CARGO_TARGET_DIR must be unset' >&2; exit 1; }
 [[ "$(rustup run "$toolchain" rustc --version)" == "$required_rustc" ]] || { echo "error: expected $required_rustc" >&2; exit 1; }
 [[ "$(wasm-tools --version)" == "$required_wasm_tools" ]] || { echo "error: expected $required_wasm_tools" >&2; exit 1; }
@@ -26,7 +28,7 @@ mkdir -p "$(dirname "$component")"
 SOURCE_DATE_EPOCH=0 LANG=C.UTF-8 LC_ALL=C CARGO_TERM_COLOR=never CARGO_ENCODED_RUSTFLAGS="$encoded" \
   cargo +"$toolchain" rustc --locked --package dekopon-memory-chat-provider \
     --target wasm32-unknown-unknown --release -- \
-    -C metadata=dekopon-memory-chat-provider-0.1.0-repro-v1 -C extra-filename=
+    -C metadata="dekopon-memory-chat-provider-$version-repro-v1" -C extra-filename=
 test -s "$core"
 wasm-tools validate "$core"
 wasm-tools component new "$core" -o "$component"
