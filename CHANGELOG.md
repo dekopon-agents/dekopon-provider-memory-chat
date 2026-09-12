@@ -9,8 +9,8 @@
 - Delete the `dekopon-run` gates from CI, release, and `scripts/test-direct-refusal.sh`. It is retired at 0.11.1 and would reject a 0.13.0 manifest. The empty-Wasmtime-linker refusal stays, and the broker, storage, and command-word ground it covered is now driven through the testkit's `FakeBroker` in `tests/broker.rs`.
 - Generalize `release.yml` from the one-shot v0.1.0 transaction: it triggers on `v*`, derives the version from the crate, and its absence proofs and failure cleanup act on this run's release and package version instead of the whole package.
 
-## 0.1.0 - unreleased
+## 0.1.0 - 2026-08-25
 
-- Extract the durable JSONL chat-memory provider from Dekopon 0.11.1 without changing its capabilities, bounds, privacy boundary, or transaction assumptions.
+- Extract the durable JSONL chat-memory provider from Dekopon 0.11.1 without changing its capabilities, bounds, or privacy boundary.
 - Own and verify the exact provider and storage WIT inputs.
 - Add independent native, component, broker/storage, resource, license, and reproducibility gates.
