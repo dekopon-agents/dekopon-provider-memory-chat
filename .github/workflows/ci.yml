@@ -40,7 +40,7 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
       - name: Compare caller-owned WIT with immutable v0.13.0
         run: ./scripts/assert-wit-sources.sh --fetch
-      - name: Run source, native, MSRV, license, and workflow gates
+      - name: Run source, native, license, and workflow gates
         run: ./scripts/validate-source.sh
   component:
     needs: source
