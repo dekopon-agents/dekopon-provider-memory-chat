@@ -483,7 +483,7 @@ jobs:
           \`$OCI_REPOSITORY@$MANIFEST_DIGEST\` (tag \`$VERSION\`). The anonymous OCI layer is
           byte-identical to \`memory-chat-provider.wasm\`; verify it with the attached SHA-256 file.
 
-          Requires Dekopon 0.13.0 broker-owned JSONL storage, opaque chat namespaces, and
+          Requires Dekopon 0.15.0 broker-owned JSONL storage, opaque chat namespaces, and
           broker-curated limits. Nothing outside a broker can supply the JSONL import.
           Recording remains hidden; retrieved text is untrusted and never automatically replayed.
           Changing provider bytes rotates authority-bound continuity. No latest or temporary tag is
