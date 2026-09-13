@@ -5,16 +5,13 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ci="$root/.github/workflows/ci.yml"
 release="$root/.github/workflows/release.yml"
-recovery="$root/.github/workflows/recover-v0.1.0.yml"
-recovery_helper="$root/scripts/recover-v0.1.0-artifacts.sh"
 attestation_verifier="$root/scripts/verify-attestation-anonymously.sh"
-[[ -f "$ci" && -f "$release" && -f "$recovery" && -f "$recovery_helper" && \
-   -f "$attestation_verifier" ]] || {
-  echo 'error: CI/release/recovery workflows and verification helpers are required' >&2
+[[ -f "$ci" && -f "$release" && -f "$attestation_verifier" ]] || {
+  echo 'error: CI/release workflows and verification helpers are required' >&2
   exit 1
 }
 
-python3 - "$ci" "$release" "$recovery" <<'PY'
+python3 - "$ci" "$release" <<'PY'
 import pathlib
 import re
 import sys
@@ -98,51 +95,13 @@ if grep -Fq 'id-token: write' <<<"$draft_job"; then
   echo 'error: draft job has unnecessary OIDC authority' >&2
   exit 1
 fi
-if grep -Eq 'provider-memory-chat:(latest|staging|tmp|temp)' "$release" "$recovery"; then
+if grep -Eq 'provider-memory-chat:(latest|staging|tmp|temp)' "$release"; then
   echo 'error: mutable OCI tag' >&2
   exit 1
 fi
-if grep -Eq 'cargo clean|CARGO_TARGET_DIR' "$ci" "$release" "$recovery"; then
+if grep -Eq 'cargo clean|CARGO_TARGET_DIR' "$ci" "$release"; then
   echo 'error: target policy violation' >&2
   exit 1
 fi
 
-for required in \
-  'workflow_dispatch:' \
-  'recover-v0.1.0-from-run-32827819089' \
-  'SOURCE_RUN_ID: "32827819089"' \
-  'SOURCE_SHA: 564abc55c8e01657ddb0e10938b9f62101e558ae' \
-  'SOURCE_TAG_OBJECT: 5bcd812905abe6fd9564be1366b955a9da5a921c' \
-  'EXPECTED_SHA: 65f82d6a422b0500269333b79be06c4155d7793df1f80ced12a8b214acb53a6b' \
-  './scripts/recover-v0.1.0-artifacts.sh "$RUNNER_TEMP/tagged"' \
-  'cargo +"$PROVIDER_RUST_TOOLCHAIN" install wasm-tools' \
-  '"$SOURCE_RUN_ID" "$SOURCE_RUN_ATTEMPT"' \
-  'git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main'; do
-  grep -Fq "$required" "$recovery" || {
-    echo "error: recovery workflow omits pinned interlock: $required" >&2
-    exit 1
-  }
-done
-if grep -Eq 'id-token: write|attestations: write' "$recovery"; then
-  echo 'error: recovery must reuse, not replace, immutable tag-run attestations' >&2
-  exit 1
-fi
-if grep -Eq 'cargo (build|test|check)|build-component[.]sh|reproducible-build[.]sh' \
-  "$recovery"; then
-  echo 'error: recovery workflow must not rebuild the component' >&2
-  exit 1
-fi
-for required in \
-  'component_artifact_id=9556257102' \
-  'sbom_artifact_id=9556257857' \
-  'component_archive_sha=9e9fc0b0d4ea018dc26147d674ed1af9568240044dd12655bf3867003c6633f7' \
-  'component_sha=65f82d6a422b0500269333b79be06c4155d7793df1f80ced12a8b214acb53a6b' \
-  'source_run_id=32827819089' \
-  'cmp "$destination/source-sbom.json" "$destination/attested-sbom.json"'; do
-  grep -Fq "$required" "$recovery_helper" || {
-    echo "error: recovery helper omits pinned source fact: $required" >&2
-    exit 1
-  }
-done
-
-printf 'workflow full-SHA pins, release/recovery transaction, provenance, and cleanup gates passed\n'
+printf 'workflow full-SHA pins, release transaction, provenance, and cleanup gates passed\n'

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - unreleased
+
+- Move to the `dekopon-provider-sdk` 0.15.0 line: bump `dekopon-provider-sdk`, `dekopon-provider-storage`, and `dekopon-provider-sdk-testkit` from `=0.13.0` to `=0.15.0`. The caller-owned WIT (`dekopon:provider@0.3.0`, `dekopon:storage`) is byte-identical between the two SDK releases, so no WIT or generated-binding change was needed.
+- No source change was needed to adopt the 0.15.0 API: this provider never constructs `CommandInvocation` directly (it goes through `CommandRun::proposal`), and its `tests/broker.rs` reads `CommandRunOutcome` back only through `serde_json::to_value`, which is forward-compatible with the new `secretUse` field being omitted when absent.
+- Delete the stale one-shot `.github/workflows/recover-v0.1.0.yml` and the `scripts/validate-workflows.sh` checks that pinned its exact content. `scripts/recover-v0.1.0-artifacts.sh` is now unreferenced and left in place.
+- Fix the hardcoded `0.13.0` version pins in `scripts/check-dependencies.sh` and `scripts/generate-sbom.sh` (both now assert `0.15.0`).
+
 ## 0.2.0 - unreleased
 
 - Move to the `dekopon-provider-sdk` 0.13.0 line: `dekopon:provider@0.3.0` WIT, Rust 1.98.1, wit-bindgen 0.62.0, wasm-tools 1.259.0, and Wasmtime 48.0.2.
