@@ -9,7 +9,10 @@ use dekopon_provider_sdk_testkit::{
 use serde_json::{Value, json};
 
 fn component() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("memory-chat-provider.wasm")
+    PathBuf::from(
+        std::env::var_os("DEKOPON_PROVIDER_COMPONENT")
+            .expect("DEKOPON_PROVIDER_COMPONENT must point at the built component"),
+    )
 }
 
 fn stored_turns_path(root: &Path) -> PathBuf {
@@ -590,5 +593,5 @@ async fn compaction_dedup_capacity_and_result_bounds_remain_independent() {
 
 #[test]
 fn generated_component_is_not_a_source_fixture() {
-    assert!(!Path::new("memory-chat-provider.wasm").is_dir());
+    assert!(!component().is_dir());
 }

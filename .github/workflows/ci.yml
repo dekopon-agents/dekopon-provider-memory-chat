@@ -1,93 +1,13 @@
 name: CI
+
 on:
   push:
+    branches: [main]
   pull_request:
+
 permissions:
   contents: read
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-env:
-  PROVIDER_RUST: "1.98.1"
-  WASM_TOOLS_VERSION: "1.259.0"
-  CARGO_DENY_VERSION: "0.20.2"
-  CARGO_CYCLONEDX_VERSION: "0.5.9"
-  WASMTIME_VERSION: "48.0.2"
-  ACTIONLINT_VERSION: "1.7.12"
-  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
 jobs:
-  source:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out without credentials
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Reject tracked Wasm
-        run: test -z "$(git ls-files '*.wasm')"
-      - name: Install pinned toolchains and policy tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$PROVIDER_RUST" --profile minimal --component clippy --component rustfmt
-          rustup target add wasm32-unknown-unknown --toolchain "$PROVIDER_RUST"
-          cargo +"$PROVIDER_RUST" install cargo-deny --version "$CARGO_DENY_VERSION" --locked
-          sudo apt-get update && sudo apt-get install --yes shellcheck ruby
-          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl --fail --silent --show-error --location "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}" --output "$RUNNER_TEMP/$archive"
-          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict -
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
-          sudo install -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
-      - name: Compare caller-owned WIT with immutable v0.13.0
-        run: ./scripts/assert-wit-sources.sh --fetch
-      - name: Run source, native, license, and workflow gates
-        run: ./scripts/validate-source.sh
-  component:
-    needs: source
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out without credentials
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Reject tracked Wasm
-        run: test -z "$(git ls-files '*.wasm')"
-      - name: Install pinned component tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$PROVIDER_RUST" --profile minimal
-          rustup target add wasm32-unknown-unknown --toolchain "$PROVIDER_RUST"
-          cargo +"$PROVIDER_RUST" install wasm-tools --version "$WASM_TOOLS_VERSION" --locked
-          cargo +"$PROVIDER_RUST" install wasmtime-cli --version "$WASMTIME_VERSION" --locked
-      - name: Build and inspect exact JSONL-only component
-        run: ./scripts/build-component.sh && ./scripts/inspect-component.sh
-      - name: Run direct refusal and real broker/storage tests
-        run: |
-          ./scripts/test-direct-refusal.sh
-          cargo +"$PROVIDER_RUST" test --locked --test broker -- --nocapture
-      - name: Verify exact release layout
-        run: ./scripts/prepare-release-assets.sh "" "$PWD/dist"
-      - name: Upload ignored review bytes
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: memory-chat-provider-component
-          path: dist/
-          if-no-files-found: error
-          retention-days: 14
-  reproducible:
-    needs: source
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out without credentials
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install pinned build tools
-        run: |
-          rustup toolchain install "$PROVIDER_RUST" --profile minimal
-          rustup target add wasm32-unknown-unknown --toolchain "$PROVIDER_RUST"
-          cargo +"$PROVIDER_RUST" install wasm-tools --version "$WASM_TOOLS_VERSION" --locked
-      - name: Two independent archives reproduce core and component
-        run: ./scripts/reproducible-build.sh
+  ci:
+    uses: dekopon-agents/provider-workflows/.github/workflows/ci.yml@4cb9276ca166bee05c04e4c40ad9bca4b1f1065c # v3
