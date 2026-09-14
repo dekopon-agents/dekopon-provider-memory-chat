@@ -38,16 +38,15 @@ Each release puts exactly `memory-chat-provider.wasm` and its `.sha256` on GitHu
 
 Generated Wasm is ignored and must never be committed. Each checkout uses its ordinary `target/` and the machine's configured global compiler cache.
 
+Build the component with the shared [`provider-workflows`](https://github.com/dekopon-agents/provider-workflows) build script, run from a sibling checkout:
+
 ```console
-rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
-rustup target add wasm32-unknown-unknown --toolchain 1.98.1
-cargo +1.98.1 install wasm-tools --version 1.259.0 --locked
-cargo +1.98.1 install wasmtime-cli --version 48.0.2 --locked
-./scripts/validate.sh
-./scripts/reproducible-build.sh
+../provider-workflows/build.sh
 ```
 
-See [SECURITY.md](SECURITY.md), [RELEASE.md](RELEASE.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Formatting, lints, `cargo deny`, the reproducible component build, and the test suite are all gated by the shared `ci / validate` workflow rather than local scripts. Tests that load the built component read its path from the `DEKOPON_PROVIDER_COMPONENT` environment variable.
+
+See [SECURITY.md](SECURITY.md) and [RELEASE.md](RELEASE.md).
 
 ## License
 
