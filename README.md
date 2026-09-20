@@ -30,7 +30,7 @@ All operational ceilings (`maxTurnBytes`, lookback/result/dedup limits, and comp
 
 ## Run and deployment
 
-Nothing outside a broker can supply the JSONL import: an empty Wasmtime linker refuses to instantiate the component. Install it only in a Dekopon 0.15.0 broker with broker-owned JSONL storage, namespace derivation, and limits. Authority-bound continuity intentionally rotates when provider bytes or effective authority change; explicit stable continuity preserves addressing while each operation is still freshly authorized.
+Nothing outside a broker can supply the JSONL import: an empty Wasmtime linker refuses to instantiate the component. Install it only in a Dekopon 0.18.0 broker with broker-owned JSONL storage, namespace derivation, and limits. Authority-bound continuity intentionally rotates when provider bytes or effective authority change; explicit stable continuity preserves addressing while each operation is still freshly authorized.
 
 Each release puts exactly `memory-chat-provider.wasm` and its `.sha256` on GitHub. Identical Wasm bytes are the sole `application/wasm` layer at `ghcr.io/dekopon-agents/provider-memory-chat:<version>`; no `latest` tag is published.
 
