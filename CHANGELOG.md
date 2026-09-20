@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.0] - 2026-09-20
+
+- Move to provider SDK 0.18.0 with unchanged provider/storage WIT and no caller-visible behavior changes.
+
 ## 0.3.0 - unreleased
 
 - Move to the `dekopon-provider-sdk` 0.15.0 line: bump `dekopon-provider-sdk`, `dekopon-provider-storage`, and `dekopon-provider-sdk-testkit` from `=0.13.0` to `=0.15.0`. The caller-owned WIT (`dekopon:provider@0.3.0`, `dekopon:storage`) is byte-identical between the two SDK releases, so no WIT or generated-binding change was needed.
