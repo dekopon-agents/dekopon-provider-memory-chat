@@ -50,16 +50,6 @@ fn canonical_turn_bytes(id: &str, commitment: &str, user: &str, assistant: &str)
         + 1
 }
 
-fn canonical_dedup_bytes(id: &str, commitment: &str) -> u64 {
-    format!(
-        "{{\"format\":\"dekopon.chat-memory.dedup\",\"version\":1,\"id\":{},\"commitment\":{}}}",
-        serde_json::to_string(id).expect("id JSON"),
-        serde_json::to_string(commitment).expect("commitment JSON")
-    )
-    .len() as u64
-        + 1
-}
-
 fn record(id: &str, commitment: &str, user: &str, assistant: &str) -> Value {
     json!({
         "operation": "record",
@@ -69,8 +59,6 @@ fn record(id: &str, commitment: &str, user: &str, assistant: &str) -> Value {
         "assistant": assistant,
         "maxTurnBytes": 4096,
         "maxLookbackTurns": 64,
-        "maxDedupRecords": 64,
-        "maxDedupBytes": 65536,
         "compactionTargetBytes": 8192,
         "compactionThresholdBytes": 16384
     })
@@ -239,7 +227,7 @@ async fn checked_component_manifest_and_command_runs_are_exact() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn durable_record_recent_search_dedup_and_conflict_are_exact() {
+async fn durable_record_recent_and_search_are_exact() {
     let broker = broker().await;
     assert_eq!(
         broker
@@ -249,7 +237,7 @@ async fn durable_record_recent_search_dedup_and_conflict_are_exact() {
             )
             .await
             .expect("first record"),
-        json!({"recorded": true, "duplicate": false})
+        json!({"recorded": true})
     );
     broker
         .invoke(
@@ -274,28 +262,6 @@ async fn durable_record_recent_search_dedup_and_conflict_are_exact() {
     assert_eq!(matched["turns"].as_array().unwrap().len(), 1);
     assert_eq!(matched["turns"][0]["id"], "turn-2");
     assert_eq!(matched["truncated"], true);
-
-    assert_eq!(
-        broker
-            .invoke(
-                "memory.chat.record",
-                record("turn-2", "commitment-2", "ignored", "ignored"),
-            )
-            .await
-            .expect("same identity and commitment is idempotent"),
-        json!({"recorded": false, "duplicate": true})
-    );
-    let conflict = broker
-        .invoke(
-            "memory.chat.record",
-            record("turn-2", "changed", "ignored", "ignored"),
-        )
-        .await
-        .expect_err("same identity with changed commitment conflicts");
-    assert_eq!(
-        conflict.provider_failure().map(|value| value.0),
-        Some("dedup-conflict")
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -341,45 +307,6 @@ async fn namespaces_and_storage_access_are_host_owned() {
         denied.provider_failure().is_none(),
         "host refusal is not guest policy: {denied}"
     );
-}
-
-/// Dekopon 0.13.0 applies each storage call directly and has no invocation rollback, so a record
-/// whose dedup append is refused keeps the turn append that already completed. The provider is
-/// still fail-closed on the operation — it reports the refusal and writes no dedup line — but the
-/// turn log is not restored, and a later `recent` sees it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_refused_second_append_keeps_the_completed_first_one() {
-    let limits = StorageLimits {
-        max_write_bytes_per_call: 220,
-        max_write_bytes_per_invocation: 220,
-        ..StorageLimits::default()
-    };
-    let broker = FakeBroker::builder()
-        .component(component())
-        .provider("memory-chat")
-        .storage(StorageInterface::Jsonl, StorageAccess::ReadWrite)
-        .storage_limits(limits)
-        .build()
-        .await
-        .expect("narrow valid storage limits");
-
-    let failure = broker
-        .invoke(
-            "memory.chat.record",
-            record("rollback", "rollback-c", "1234567890", "abcdefghij"),
-        )
-        .await
-        .expect_err("cumulative quota rejects the later dedup append");
-    assert!(
-        storage_was_reached(&failure),
-        "the namespace was reached: {failure}"
-    );
-    let after = broker
-        .invoke("memory.chat.recent", recent(1, 65_536))
-        .await
-        .expect("reads remain available after the refusal");
-    assert_eq!(after["turns"].as_array().unwrap().len(), 1);
-    assert_eq!(after["turns"][0]["id"], "rollback");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -440,8 +367,8 @@ async fn size_read_and_replace_host_failures_are_terminal() {
         .provider("memory-chat")
         .storage(StorageInterface::Jsonl, StorageAccess::ReadWrite)
         .storage_limits(StorageLimits {
-            max_write_bytes_per_call: 300,
-            max_write_bytes_per_invocation: 300,
+            max_write_bytes_per_call: 200,
+            max_write_bytes_per_invocation: 200,
             ..StorageLimits::default()
         })
         .build()
@@ -464,7 +391,7 @@ async fn size_read_and_replace_host_failures_are_terminal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn canonical_turn_and_dedup_byte_bounds_accept_exactly_and_reject_one_less() {
+async fn canonical_turn_byte_bound_accepts_exactly_and_rejects_one_less() {
     let exact_turn = broker().await;
     let turn_bytes = canonical_turn_bytes("turn-bound", "turn-c", "user", "assistant");
     let mut input = record("turn-bound", "turn-c", "user", "assistant");
@@ -484,27 +411,6 @@ async fn canonical_turn_and_dedup_byte_bounds_accept_exactly_and_reject_one_less
     assert_eq!(
         error.provider_failure().map(|value| value.0),
         Some("result-too-large")
-    );
-
-    let exact_dedup = broker().await;
-    let dedup_bytes = canonical_dedup_bytes("dedup-bound", "dedup-c");
-    let mut input = record("dedup-bound", "dedup-c", "user", "assistant");
-    input["maxDedupBytes"] = json!(dedup_bytes);
-    exact_dedup
-        .invoke("memory.chat.record", input)
-        .await
-        .expect("exact maxDedupBytes accepts the complete canonical line");
-
-    let short_dedup = broker().await;
-    let mut input = record("dedup-bound", "dedup-c", "user", "assistant");
-    input["maxDedupBytes"] = json!(dedup_bytes - 1);
-    let error = short_dedup
-        .invoke("memory.chat.record", input)
-        .await
-        .expect_err("one byte below maxDedupBytes is rejected");
-    assert_eq!(
-        error.provider_failure().map(|value| value.0),
-        Some("dedup-capacity")
     );
 }
 
@@ -543,7 +449,7 @@ async fn corrupt_and_truncated_host_backed_turn_logs_fail_closed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn compaction_dedup_capacity_and_result_bounds_remain_independent() {
+async fn compaction_and_result_bounds_remain_independent() {
     let broker = broker().await;
     for index in 0..3 {
         let mut value = record(
@@ -568,17 +474,6 @@ async fn compaction_dedup_capacity_and_result_bounds_remain_independent() {
     assert_eq!(
         compacted["turns"].as_array().unwrap().last().unwrap()["id"],
         "compact-2"
-    );
-
-    let mut capped = record("capacity", "capacity-c", "u", "a");
-    capped["maxDedupRecords"] = json!(3);
-    let error = broker
-        .invoke("memory.chat.record", capped)
-        .await
-        .expect_err("permanent dedup log capacity is enforced despite turn compaction");
-    assert_eq!(
-        error.provider_failure().map(|value| value.0),
-        Some("dedup-capacity")
     );
 
     let too_small = broker

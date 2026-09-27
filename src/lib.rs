@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const TURNS: &str = "turns.jsonl";
-const DEDUP: &str = "dedup.jsonl";
 const CHUNK: u32 = 256 * 1024;
 /// The three capability identifiers, read by both `manifest` and `run_command` so renaming one
 /// is a compile error rather than an exit code a model discovers mid-session.
@@ -56,15 +55,6 @@ struct Turn {
     assistant: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Dedup {
-    format: String,
-    version: u8,
-    id: String,
-    commitment: String,
-}
-
 #[derive(Deserialize)]
 #[serde(
     tag = "operation",
@@ -80,8 +70,6 @@ enum Input {
         assistant: String,
         max_turn_bytes: u64,
         max_lookback_turns: u32,
-        max_dedup_records: u64,
-        max_dedup_bytes: u64,
         compaction_target_bytes: u64,
         compaction_threshold_bytes: u64,
     },
@@ -154,8 +142,6 @@ impl Provider for MemoryChat {
                     assistant,
                     max_turn_bytes,
                     max_lookback_turns,
-                    max_dedup_records,
-                    max_dedup_bytes,
                     compaction_target_bytes,
                     compaction_threshold_bytes,
                 },
@@ -166,8 +152,6 @@ impl Provider for MemoryChat {
                 assistant,
                 max_turn_bytes,
                 max_lookback_turns,
-                max_dedup_records,
-                max_dedup_bytes,
                 compaction_target_bytes,
                 compaction_threshold_bytes,
             }),
@@ -274,36 +258,16 @@ struct RecordLimits {
     assistant: String,
     max_turn_bytes: u64,
     max_lookback_turns: u32,
-    max_dedup_records: u64,
-    max_dedup_bytes: u64,
     compaction_target_bytes: u64,
     compaction_threshold_bytes: u64,
 }
 
 fn record(input: RecordLimits) -> Result<Value, ProviderError> {
-    let (dedup_size, dedup_bytes) = read_file(DEDUP)?;
-    let entries = parse_lines::<Dedup>(&dedup_bytes, "dekopon.chat-memory.dedup")?;
-    if let Some(existing) = entries.iter().find(|entry| entry.id == input.id) {
-        if existing.commitment == input.commitment {
-            return Ok(json!({"recorded":false,"duplicate":true}));
-        }
-        return Err(ProviderError::new(
-            "dedup-conflict",
-            "record identity conflicts",
-        ));
-    }
-    if entries.len() as u64 >= input.max_dedup_records {
-        return Err(ProviderError::new(
-            "dedup-capacity",
-            "deduplication capacity reached",
-        ));
-    }
-
     let turn = Turn {
         format: "dekopon.chat-memory.turn".to_owned(),
         version: 1,
-        id: input.id.clone(),
-        commitment: input.commitment.clone(),
+        id: input.id,
+        commitment: input.commitment,
         user: input.user,
         assistant: input.assistant,
     };
@@ -317,28 +281,9 @@ fn record(input: RecordLimits) -> Result<Value, ProviderError> {
             "turn exceeds configured canonical line bound",
         ));
     }
-    let dedup = Dedup {
-        format: "dekopon.chat-memory.dedup".to_owned(),
-        version: 1,
-        id: input.id,
-        commitment: input.commitment,
-    };
-    let dedup_line = serde_json::to_vec(&dedup).map_err(|_| corrupt())?;
-    if dedup_size
-        .checked_add(dedup_line.len() as u64)
-        .and_then(|value| value.checked_add(1))
-        .is_none_or(|value| value > input.max_dedup_bytes)
-    {
-        return Err(ProviderError::new(
-            "dedup-capacity",
-            "deduplication byte capacity reached",
-        ));
-    }
-
     let (turns_size, turns_bytes) = read_file(TURNS)?;
     let mut turns = parse_lines::<Turn>(&turns_bytes, "dekopon.chat-memory.turn")?;
     let appended_size = jsonl::append(TURNS, turns_size, &turn_line).map_err(storage)?;
-    jsonl::append(DEDUP, dedup_size, &dedup_line).map_err(storage)?;
     turns.push(turn);
 
     if appended_size >= input.compaction_threshold_bytes {
@@ -349,7 +294,7 @@ fn record(input: RecordLimits) -> Result<Value, ProviderError> {
         )?;
         jsonl::replace(TURNS, appended_size, &compacted).map_err(storage)?;
     }
-    Ok(json!({"recorded":true,"duplicate":false}))
+    Ok(json!({"recorded":true}))
 }
 
 fn compact(turns: &[Turn], lookback: usize, target: u64) -> Result<Vec<u8>, ProviderError> {

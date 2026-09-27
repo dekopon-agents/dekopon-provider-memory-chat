@@ -4,11 +4,11 @@ A standalone broker-only WebAssembly component implementing hidden `memory.chat.
 
 ## Authority and privacy boundary
 
-The provider owns JSON encoding, bounded retrieval, literal Unicode-lowercase search, deduplication, and compaction for the logical names `turns.jsonl` and `dedup.jsonl`. It does **not** own authorization, authenticated chat identity, namespaces, grants, quotas, retention policy, or storage paths. Those remain broker/storage-host responsibilities.
+The provider owns JSON encoding, bounded retrieval, literal Unicode-lowercase search, and compaction for the logical name `turns.jsonl`. It does **not** own authorization, authenticated chat identity, namespaces, grants, quotas, retention policy, or storage paths. Those remain broker/storage-host responsibilities.
 
 `memory.chat.record` is intentionally absent from command resolution and its advertised schema is an empty closed object. Only the broker's hidden post-acceptance route may supply its curated record fields. Retrieved text is untrusted content: it is never identity, policy input, or automatically replayed prompt context. Storage telemetry must not expose turn content or identifying namespace material.
 
-The storage host must bind each invocation to a broker-authorized JSONL grant and opaque chat namespace. As of Dekopon 0.13.0 each guest `append` and `replace` is applied by the host when it is called; there is no invocation transaction and no rollback. A record whose dedup append is refused keeps the turn append that already completed, and the provider reports the refusal rather than pretending the write did not happen.
+The storage host must bind each invocation to a broker-authorized JSONL grant and opaque chat namespace. As of Dekopon 0.13.0 each guest `append` and `replace` is applied by the host when it is called; there is no invocation transaction and no rollback. Exactly-once delivery is not a goal: a redelivered record is appended as its own turn rather than deduplicated, and a compaction replace refused after its turn append already completed leaves that append in place; the provider reports the refusal rather than pretending the write did not happen.
 
 ## Exact capabilities
 
@@ -22,11 +22,11 @@ The only command word is `memory`. It behaves like a command-line program throug
 
 ## Durable format and bounds
 
-`turns.jsonl` contains strict LF-terminated `{format:"dekopon.chat-memory.turn",version:1,id,commitment,user,assistant}` records. It compacts with hysteresis at `compactionThresholdBytes`, keeping the newest bounded lookback that fits `compactionTargetBytes`. `dedup.jsonl` contains strict LF-terminated `{format:"dekopon.chat-memory.dedup",version:1,id,commitment}` entries; it is finite and never compacted.
+`turns.jsonl` contains strict LF-terminated `{format:"dekopon.chat-memory.turn",version:1,id,commitment,user,assistant}` records. It compacts with hysteresis at `compactionThresholdBytes`, keeping the newest bounded lookback that fits `compactionTargetBytes`. There is no separate dedup log: `id` and `commitment` are stored on each turn as opaque broker-minted fields, not compared against earlier turns.
 
-Unknown fields, wrong format/version, malformed JSON, and truncated final lines fail as `memory-corrupt`. Duplicate ID and commitment succeeds without mutation; a changed commitment is `dedup-conflict`; record/byte exhaustion is `dedup-capacity` while reads remain available. Recent and search return whole chronological turns within `maxResultBytes`, or `result-too-large`. Search is literal substring matching after Unicode lowercase conversion, not regex or semantic search.
+Unknown fields, wrong format/version, malformed JSON, and truncated final lines fail as `memory-corrupt`. A turn exceeding `maxTurnBytes` fails as `result-too-large`. Every record call appends a turn, whatever its `id` or `commitment`; a redelivered record is not deduplicated or refused. Recent and search return whole chronological turns within `maxResultBytes`, or `result-too-large`. Search is literal substring matching after Unicode lowercase conversion, not regex or semantic search.
 
-All operational ceilings (`maxTurnBytes`, lookback/result/dedup limits, and compaction target/threshold) are broker-curated inputs, not model-selected controls. Storage reads use 256 KiB chunks. The broker must additionally enforce storage, call, memory, fuel, timeout, and output ceilings.
+All operational ceilings (`maxTurnBytes`, lookback/result limits, and compaction target/threshold) are broker-curated inputs, not model-selected controls. Storage reads use 256 KiB chunks. The broker must additionally enforce storage, call, memory, fuel, timeout, and output ceilings.
 
 ## Run and deployment
 
