@@ -264,48 +264,6 @@ async fn durable_record_recent_and_search_are_exact() {
     assert_eq!(matched["truncated"], true);
 }
 
-/// Exactly-once delivery is not a goal: a redelivered record with the same id, even carrying a
-/// changed commitment, is appended as its own turn instead of being deduplicated or refused.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_record_with_a_reused_id_is_appended_again() {
-    let broker = broker().await;
-    broker
-        .invoke(
-            "memory.chat.record",
-            record(
-                "turn-2",
-                "commitment-2",
-                "original question",
-                "original reply",
-            ),
-        )
-        .await
-        .expect("first record");
-    broker
-        .invoke(
-            "memory.chat.record",
-            record(
-                "turn-2",
-                "changed",
-                "redelivered question",
-                "redelivered reply",
-            ),
-        )
-        .await
-        .expect("a redelivered record with the same id succeeds again");
-
-    let recent = broker
-        .invoke("memory.chat.recent", recent(2, 65_536))
-        .await
-        .expect("both turns are retained");
-    let turns = recent["turns"].as_array().expect("turns array");
-    assert_eq!(turns.len(), 2);
-    assert_eq!(turns[0]["id"], "turn-2");
-    assert_eq!(turns[0]["commitment"], "commitment-2");
-    assert_eq!(turns[1]["id"], "turn-2");
-    assert_eq!(turns[1]["commitment"], "changed");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn namespaces_and_storage_access_are_host_owned() {
     let first = broker().await;

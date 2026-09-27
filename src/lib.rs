@@ -281,7 +281,6 @@ fn record(input: RecordLimits) -> Result<Value, ProviderError> {
             "turn exceeds configured canonical line bound",
         ));
     }
-
     let (turns_size, turns_bytes) = read_file(TURNS)?;
     let mut turns = parse_lines::<Turn>(&turns_bytes, "dekopon.chat-memory.turn")?;
     let appended_size = jsonl::append(TURNS, turns_size, &turn_line).map_err(storage)?;
