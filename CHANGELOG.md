@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 - unreleased
+## [0.5.0] - 2026-09-27
 
 - **Breaking:** drop the `dedup.jsonl` log and its `dedup-conflict`/`dedup-capacity` failures. Exactly-once delivery is not a goal; `memory.chat.record` now appends every call as its own turn, whatever `id` or `commitment` it carries, instead of refusing or silently no-op'ing a redelivered one. `maxDedupRecords` and `maxDedupBytes` are removed from the `record` input schema and refused as unknown fields. `turns.jsonl`'s on-disk shape is unchanged; `id` and `commitment` remain on each stored turn as opaque broker-minted fields.
 
