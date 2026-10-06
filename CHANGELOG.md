@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.0] - 2026-10-06
+
+- **Changed:** Rename memory capability IDs to `memory-chat.record`, `memory-chat.recent` and `memory-chat.search`.
+- **Removed:** Drop the `memory search -` piped-query command.
+- **Changed:** Move the provider to the typed SDK 0.34 stdio and JSONL interfaces.
+
 ## [0.5.0] - 2026-09-27
 
 - **Breaking:** drop the `dedup.jsonl` log and its `dedup-conflict`/`dedup-capacity` failures. Exactly-once delivery is not a goal; `memory.chat.record` now appends every call as its own turn, whatever `id` or `commitment` it carries, instead of refusing or silently no-op'ing a redelivered one. `maxDedupRecords` and `maxDedupBytes` are removed from the `record` input schema and refused as unknown fields. `turns.jsonl`'s on-disk shape is unchanged; `id` and `commitment` remain on each stored turn as opaque broker-minted fields.

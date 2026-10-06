@@ -6,7 +6,7 @@ A standalone broker-only WebAssembly component implementing hidden `memory-chat.
 
 The provider owns JSON encoding, bounded retrieval, literal Unicode-lowercase search, and compaction for the logical name `turns.jsonl`. It does **not** own authorization, authenticated chat identity, namespaces, grants, quotas, retention policy, or storage paths. Those remain broker/storage-host responsibilities.
 
-`memory-chat.record` is intentionally absent from command resolution and its advertised schema requires the broker-curated record fields. Only the broker's hidden post-acceptance route may supply its curated record fields. Retrieved text is untrusted content: it is never identity, policy input, or automatically replayed prompt context. Storage telemetry must not expose turn content or identifying namespace material.
+`memory-chat.record` is intentionally absent from command resolution and its advertised schema requires the broker-curated record fields. Only the broker's hidden delivered-turn route may supply its curated record fields; a successful record writes no stdout. Retrieved text is untrusted content: it is never identity, policy input, or automatically replayed prompt context. Storage telemetry must not expose turn content or identifying namespace material.
 
 The storage host must bind each invocation to a broker-authorized JSONL grant and opaque chat namespace. As of Dekopon 0.13.0 each guest `append` and `replace` is applied by the host when it is called; there is no invocation transaction and no rollback. Exactly-once delivery is not a goal: a redelivered record is appended as its own turn rather than deduplicated, and a compaction replace refused after its turn append already completed leaves that append in place; the provider reports the refusal rather than pretending the write did not happen.
 
@@ -18,7 +18,7 @@ The storage host must bind each invocation to a broker-authorized JSONL grant an
 | `memory-chat.recent` | read-only | High |
 | `memory-chat.search` | read-only | High |
 
-The only command word is `memory`. It behaves like a command-line program through the `run-command` export: `memory --help` renders a help page on standard output at status 0, `memory recent --last N` and `memory search --query TEXT` propose their capability, `memory search -` is not supported; invalid argv renders a usage error on standard error. Record never runs from a command.
+The only command word is `memory`. The typed SDK proposes from argv and `stdin_piped` without reading stdin; its stdio streams carry results and errors. `memory --help` renders a help page on standard output at status 0. `memory recent --last N` and `memory search --query TEXT` propose their capability; `memory search -` was removed in 0.6.0 and stdin is never read. Invalid argv renders a usage error on standard error. Record never runs from a command.
 
 ## Durable format and bounds
 
@@ -31,6 +31,8 @@ All operational ceilings (`maxTurnBytes`, lookback/result limits, and compaction
 ## Run and deployment
 
 Nothing outside a broker can supply the JSONL import: an empty Wasmtime linker refuses to instantiate the component. Install it only in a Dekopon 0.34.0-or-newer broker with broker-owned JSONL storage, namespace derivation, and limits. Authority-bound continuity intentionally rotates when provider bytes or effective authority change; explicit stable continuity preserves addressing while each operation is still freshly authorized.
+
+For a synthetic deployment check, Dekopon 0.35.0's console `--smoke-conversation` creates a dedicated `console-smoke` scope. After confirming that claim, `:smoke record '<synthetic marker>'` sends a delivered turn through the hidden broker route; `memory recent --last 1` and `memory search --query <marker>` can read it in that same session. This does not require reading or seeding a real chat, and an ordinary unscoped console session has no memory surface.
 
 The shared release workflow publishes `memory-chat-provider.wasm`, its `.sha256`, and a CycloneDX SBOM. The Wasm is the sole `application/wasm` layer at `ghcr.io/dekopon-agents/provider-memory-chat:<version>`.
 
