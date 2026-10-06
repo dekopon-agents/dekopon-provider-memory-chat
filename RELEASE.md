@@ -1,26 +1,21 @@
 # Release
 
-No release is authorized by repository state alone. A human authorizes one `v<version>` tag after reviewing a clean current `main`, the complete validation gate, and two independent archive builds.
+A repository state does not authorize a release. After a reviewed, green validation gate and current clean `main`, the authorized operator confirms the `v<version>` tag, GitHub release (including drafts), and `ghcr.io/dekopon-agents/provider-memory-chat:<version>` are absent. A collision stops release; never overwrite or retag. The operator pushes one annotated tag on `main` matching the Cargo package version. Do not upload locally built bytes.
 
-## Preflight
+## Shared workflow
 
-1. Confirm `main` is clean/current and CI succeeds.
-2. Run `./scripts/validate.sh` and `./scripts/reproducible-build.sh`.
-3. Prove the tag, every release with that tag, and the `ghcr.io/dekopon-agents/provider-memory-chat` tag for that version are absent. Stop rather than overwrite any state; earlier versions stay.
-4. Create and push one annotated `v<version>` tag at current `main`, matching the crate version. Never upload locally built bytes.
+The caller `.github/workflows/release.yml` invokes `dekopon-agents/provider-workflows/.github/workflows/release.yml@main`. Its tag build requires an annotated tag, exact package version and main ancestry; it rebuilds from source with the shared build script, verifies the checksum, runs the test suite, and generates a CycloneDX SBOM. The attestation signer repository is `dekopon-agents/provider-workflows`. The workflow publishes three release assets: `memory-chat-provider.wasm`, `memory-chat-provider.wasm.sha256`, and `memory-chat-provider.cdx.json`. A stable release is marked latest. It publishes the identical Wasm as the sole `application/wasm` layer of `ghcr.io/dekopon-agents/provider-memory-chat:<version>` and verifies that layer's digest against the sidecar.
 
-## Actions-owned transaction
+## Verify the published version
 
-The tag workflow rejects another tag, a lightweight tag, version/ref/SHA mismatch, or a tag not on current `main`. Actions rebuilds from immutable source and creates exactly `memory-chat-provider.wasm` and `memory-chat-provider.wasm.sha256`. The SBOM is an attestation predicate, not a release asset.
+Inspect the release run to completion. Download all three assets outside the checkout. In their directory, check `shasum -a 256 -c memory-chat-provider.wasm.sha256` and validate the CycloneDX JSON. Verify the Wasm provenance against the peeled tag's `main` merge commit:
 
-Actions attests the component with build provenance and CycloneDX, then creates one run-marker-owned draft and captures its immutable ID. It uploads/redownloads the two assets by ID and byte-compares them. It pushes the same Wasm as one `application/wasm` layer under artifact type `application/vnd.dekopon.provider.v1+wasm` at only this version's tag, verifies that exactly one package version carries this run's digest and only that tag, checks the anonymously pulled bytes, and makes the package public only after verification.
+```console
+gh attestation verify memory-chat-provider.wasm -R dekopon-agents/dekopon-provider-memory-chat --format json --signer-repo dekopon-agents/provider-workflows --source-ref refs/tags/v<version> --source-digest <main-merge-SHA>
+```
 
-Immediately before the final mutation, Actions rechecks tag/main, draft asset IDs and bytes, exact JSONL-only WIT with no WASI, public attestations, digest-pinned anonymous OCI bytes, and that this version's tag is present with no mutable tag beside it. Only then does it publish the captured release with `draft=false`, `prerelease=false`, and `make_latest=false`; credentials-free verification follows.
+Require the verified subject SHA-256 to equal the sidecar and the peeled tag to equal that merge commit. Use `crane manifest ghcr.io/dekopon-agents/provider-memory-chat:<version>` to assert **exactly one** layer with media type `application/wasm` and digest `sha256:<attested-wasm-SHA256>`. Use `crane digest ghcr.io/dekopon-agents/provider-memory-chat:<version>` for the distinct immutable **manifest** digest to pin deployments, not the Wasm layer digest. Verify the decoded component imports only the SDK's JSONL storage and stdio interfaces, with no WASI or ambient authority.
 
-Release notes must state that broker-owned storage, opaque namespaces, and limits are required; nothing outside a broker can supply the JSONL import; record is hidden; retrieved text is untrusted; and changing provider bytes rotates authority-bound continuity.
+Release notes must state that broker-owned storage, opaque namespaces and limits are required; record is hidden behind delivered turns; retrieved text is untrusted; and changing provider bytes rotates authority-bound continuity. A synthetic console-smoke scope can test record and reads without accessing real-chat contents.
 
-## Failure and recovery
-
-Failure/cancellation cleanup may mutate only state proven to belong to the exact run using captured release/package IDs, digest, and marker. Hide/delete this run's OCI package version first — never another release's — then delete the captured draft (or run-owned not-yet-accepted final release), and prove original absence. Never infer ownership from a mutable tag; never delete unrelated package versions; surface cleanup failures. Attestations may remain as immutable evidence.
-
-If cleanup cannot prove ownership or original absence, stop. A recovery workflow must be written for the observed immutable IDs and reviewed as a separate commit; it must reuse the retained successful Actions artifact and never rebuild/substitute bytes.
+On workflow failure, stop and inspect the run's exact immutable IDs and artifacts. Do not manually publish, replace bytes, retag, or delete unrelated versions.
