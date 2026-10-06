@@ -28,7 +28,13 @@ use dekopon_capability::{
 use dekopon_core::{Actor, RiskLevel};
 use dekopon_storage_host::{ContinuityPolicy, StorageHost, StorageLimits};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 const TRACE: &str = "00-0000000000000000000000000000f1c7-00000000000000f1-00";
 
@@ -202,9 +208,11 @@ fn grant() -> AttestorGrant {
     }
 }
 fn temp_root() -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "memory-chat-broker-{}-{}",
+        "memory-chat-broker-{}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
