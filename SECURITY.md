@@ -6,7 +6,7 @@ Only the newest released version is supported. Report vulnerabilities privately 
 
 ## Security boundary
 
-This component is an untrusted deterministic guest. It imports only `dekopon:storage/jsonl@0.1.0`. The broker remains responsible for authentication, authorization, hidden recording, opaque namespace derivation, single-use grants, storage quotas, Wasmtime limits, audit minimization, and ensuring recording follows one accepted delivery with no retry after uncertainty.
+This component is an untrusted deterministic guest. It imports only `dekopon:storage/jsonl@0.1.1` and `dekopon:stdio/streams@0.1.0`. The broker remains responsible for authentication, authorization, hidden recording, opaque namespace derivation, single-use grants, storage quotas, Wasmtime limits, audit minimization, and ensuring recording follows one accepted delivery with no retry after uncertainty.
 
 Memory has no encryption-at-rest, deletion/export UI, human-read proof, or delivery proof claim. Retrieved text is untrusted. Since Dekopon 0.13.0 the storage host applies each call directly and never rolls an invocation back, so a failed record can leave a completed write. Operators must provide broker-owned storage; nothing else can instantiate the component.
 

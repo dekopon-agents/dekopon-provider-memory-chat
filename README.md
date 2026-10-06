@@ -1,12 +1,12 @@
 # Dekopon memory-chat provider
 
-A standalone broker-only WebAssembly component implementing hidden `memory.chat.record` and explicit `memory.chat.recent` and `memory.chat.search`. The component imports exactly `dekopon:storage/jsonl@0.1.0`; it has no HTTP, WASI, filesystem, environment, clock, random, subprocess, or other ambient authority.
+A standalone broker-only WebAssembly component implementing hidden `memory-chat.record` and explicit `memory-chat.recent` and `memory-chat.search`. The component imports `dekopon:storage/jsonl@0.1.1` and `dekopon:stdio/streams@0.1.0`; it has no HTTP, WASI, filesystem, environment, clock, random, subprocess, or other ambient authority.
 
 ## Authority and privacy boundary
 
 The provider owns JSON encoding, bounded retrieval, literal Unicode-lowercase search, and compaction for the logical name `turns.jsonl`. It does **not** own authorization, authenticated chat identity, namespaces, grants, quotas, retention policy, or storage paths. Those remain broker/storage-host responsibilities.
 
-`memory.chat.record` is intentionally absent from command resolution and its advertised schema is an empty closed object. Only the broker's hidden post-acceptance route may supply its curated record fields. Retrieved text is untrusted content: it is never identity, policy input, or automatically replayed prompt context. Storage telemetry must not expose turn content or identifying namespace material.
+`memory-chat.record` is intentionally absent from command resolution and its advertised schema requires the broker-curated record fields. Only the broker's hidden post-acceptance route may supply its curated record fields. Retrieved text is untrusted content: it is never identity, policy input, or automatically replayed prompt context. Storage telemetry must not expose turn content or identifying namespace material.
 
 The storage host must bind each invocation to a broker-authorized JSONL grant and opaque chat namespace. As of Dekopon 0.13.0 each guest `append` and `replace` is applied by the host when it is called; there is no invocation transaction and no rollback. Exactly-once delivery is not a goal: a redelivered record is appended as its own turn rather than deduplicated, and a compaction replace refused after its turn append already completed leaves that append in place; the provider reports the refusal rather than pretending the write did not happen.
 
@@ -14,11 +14,11 @@ The storage host must bind each invocation to a broker-authorized JSONL grant an
 
 | Capability | Effect | Risk |
 |---|---|---|
-| `memory.chat.record` | local-write | Medium |
-| `memory.chat.recent` | read-only | High |
-| `memory.chat.search` | read-only | High |
+| `memory-chat.record` | local-write | Medium |
+| `memory-chat.recent` | read-only | High |
+| `memory-chat.search` | read-only | High |
 
-The only command word is `memory`. It behaves like a command-line program through the `run-command` export: `memory --help` renders a help page on standard output at status 0, `memory recent --last N` and `memory search --query TEXT` propose their capability, `memory search -` takes the query from the value piped into the word, and any other argv renders a usage error on standard error at status 2. Record never runs from a command.
+The only command word is `memory`. It behaves like a command-line program through the `run-command` export: `memory --help` renders a help page on standard output at status 0, `memory recent --last N` and `memory search --query TEXT` propose their capability, `memory search -` is not supported; invalid argv renders a usage error on standard error. Record never runs from a command.
 
 ## Durable format and bounds
 
@@ -30,9 +30,9 @@ All operational ceilings (`maxTurnBytes`, lookback/result limits, and compaction
 
 ## Run and deployment
 
-Nothing outside a broker can supply the JSONL import: an empty Wasmtime linker refuses to instantiate the component. Install it only in a Dekopon 0.18.0 broker with broker-owned JSONL storage, namespace derivation, and limits. Authority-bound continuity intentionally rotates when provider bytes or effective authority change; explicit stable continuity preserves addressing while each operation is still freshly authorized.
+Nothing outside a broker can supply the JSONL import: an empty Wasmtime linker refuses to instantiate the component. Install it only in a Dekopon 0.34.0-or-newer broker with broker-owned JSONL storage, namespace derivation, and limits. Authority-bound continuity intentionally rotates when provider bytes or effective authority change; explicit stable continuity preserves addressing while each operation is still freshly authorized.
 
-Each release puts exactly `memory-chat-provider.wasm` and its `.sha256` on GitHub. Identical Wasm bytes are the sole `application/wasm` layer at `ghcr.io/dekopon-agents/provider-memory-chat:<version>`; no `latest` tag is published.
+The shared release workflow publishes `memory-chat-provider.wasm`, its `.sha256`, and a CycloneDX SBOM. The Wasm is the sole `application/wasm` layer at `ghcr.io/dekopon-agents/provider-memory-chat:<version>`.
 
 ## Build and validation
 

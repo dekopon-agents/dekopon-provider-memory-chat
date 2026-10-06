@@ -1,492 +1,408 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
+//! Real published 0.34 broker + storage host JSONL witnesses against the built component.
+#![cfg(unix)]
+use dekopon_broker::{
+    Attestation, AttestorGrant, Broker, BrokerLimits, CapabilityRoute, ChatMemoryConfig,
+    ChatTransportKind, ConstraintCatalog, ConstraintSet, Conversation, ConversationKind,
+    CredentialStore, IdentityDirectory, InMemoryAuditLog, PolicyEngine, PolicyWorld,
 };
-
-use dekopon_provider_sdk_testkit::{
-    CommandRunOutcome, FakeBroker, FakeBrokerError, StorageAccess, StorageInterface, StorageLimits,
+use dekopon_broker_host::{
+    BrokerHostLimits, BrokerProviderRegistry, CommandRunOutcome, Streams, asset::AssetInputs,
 };
+use dekopon_broker_protocol::{
+    ChatScopeClaim, DeliveredAnswer, DeliveredTurnRequest, DeliveryIdentity, InvocationRequest,
+};
+use dekopon_capability::{
+    EffectKind, ExecutionConstraints, InvocationOutcome, StorageAccess, StorageConstraints,
+    StorageInterface, StorageScope,
+};
+use dekopon_core::{Actor, RiskLevel};
+use dekopon_storage_host::{ContinuityPolicy, StorageHost, StorageLimits};
 use serde_json::{Value, json};
+use std::{path::Path, sync::Arc};
 
-fn component() -> PathBuf {
-    PathBuf::from(
-        std::env::var_os("DEKOPON_PROVIDER_COMPONENT")
-            .expect("DEKOPON_PROVIDER_COMPONENT must point at the built component"),
+const TRACE: &str = "00-0000000000000000000000000000f1c7-00000000000000f1-00";
+
+fn stdout_streams() -> (AssetInputs, std::thread::JoinHandle<Vec<u8>>) {
+    let (writer, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    let captured = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut bytes).unwrap();
+        bytes
+    });
+    (
+        AssetInputs {
+            streams: Some(Streams {
+                stdin: None,
+                stdout: writer.into(),
+            }),
+            ..Default::default()
+        },
+        captured,
     )
 }
-
-fn stored_turns_path(root: &Path) -> PathBuf {
-    fn visit(directory: &Path, matches: &mut Vec<PathBuf>) {
-        for entry in fs::read_dir(directory).expect("walk storage root") {
-            let path = entry.expect("storage entry").path();
+fn constraint(
+    route: CapabilityRoute,
+    effect: EffectKind,
+    risk: RiskLevel,
+    access: StorageAccess,
+) -> ConstraintSet {
+    ConstraintSet {
+        route,
+        provider: "memory-chat".parse().unwrap(),
+        effect,
+        risk,
+        credential: None,
+        constraints: ExecutionConstraints {
+            asset: None,
+            timeout_ms: 10_000,
+            http: None,
+            secret_use: None,
+            storage: Some(StorageConstraints {
+                interface: StorageInterface::Jsonl,
+                access,
+                scope: StorageScope::PrivateConversation,
+                retention: Default::default(),
+            }),
+        },
+    }
+}
+async fn broker(root: &Path) -> Broker<InMemoryAuditLog> {
+    let storage = StorageHost::open(root, StorageLimits::default()).unwrap();
+    let registry = BrokerProviderRegistry::load_with_storage(
+        [std::path::PathBuf::from(
+            std::env::var_os("DEKOPON_PROVIDER_COMPONENT").expect("built component"),
+        )],
+        BrokerHostLimits::default(),
+        Some(storage),
+    )
+    .await
+    .unwrap();
+    let world = PolicyWorld::new(
+        ["gateway".parse().unwrap(), "maintainer".parse().unwrap()],
+        registry
+            .capabilities()
+            .map(|(provider, capability)| (capability.id.clone(), provider.clone())),
+    )
+    .unwrap();
+    let policy = PolicyEngine::new(r#"
+        @id("prompt") permit(principal == Dekopon::Principal::"maintainer",
+            action == Dekopon::Action::"agent.prompt", resource == Dekopon::Agent::"reviewer")
+            when { context.via == "gateway" };
+        @id("record") permit(principal == Dekopon::Principal::"maintainer",
+            action == Dekopon::Action::"memory-chat.record", resource == Dekopon::Provider::"memory-chat")
+            when { context.via == "gateway" && context.agent == "reviewer" };
+        @id("recent") permit(principal == Dekopon::Principal::"maintainer",
+            action == Dekopon::Action::"memory-chat.recent", resource == Dekopon::Provider::"memory-chat")
+            when { context.via == "gateway" && context.agent == "reviewer" };
+        @id("search") permit(principal == Dekopon::Principal::"maintainer",
+            action == Dekopon::Action::"memory-chat.search", resource == Dekopon::Provider::"memory-chat")
+            when { context.via == "gateway" && context.agent == "reviewer" };"#, &world).unwrap();
+    let constraints = ConstraintCatalog::new(
+        [
+            (
+                "memory-chat.record",
+                CapabilityRoute::ChatMemoryRecord,
+                EffectKind::LocalWrite,
+                RiskLevel::Medium,
+                StorageAccess::ReadWrite,
+            ),
+            (
+                "memory-chat.recent",
+                CapabilityRoute::ChatMemoryRecent,
+                EffectKind::ReadOnly,
+                RiskLevel::High,
+                StorageAccess::ReadOnly,
+            ),
+            (
+                "memory-chat.search",
+                CapabilityRoute::ChatMemorySearch,
+                EffectKind::ReadOnly,
+                RiskLevel::High,
+                StorageAccess::ReadOnly,
+            ),
+        ]
+        .map(|(name, route, effect, risk, access)| {
+            (
+                name.parse().unwrap(),
+                constraint(route, effect, risk, access),
+            )
+        }),
+    )
+    .unwrap();
+    Broker::new(
+        registry,
+        "broker".parse().unwrap(),
+        "memory-test".to_owned(),
+        policy,
+        constraints,
+        CredentialStore::empty(),
+        IdentityDirectory::new([(
+            "slack.t0123abc.u9xyz".parse().unwrap(),
+            "maintainer".parse().unwrap(),
+        )])
+        .unwrap(),
+        Arc::new(InMemoryAuditLog::new(64).unwrap()),
+        BrokerLimits::default(),
+    )
+    .unwrap()
+    .with_chat_memory(ChatMemoryConfig {
+        continuity_policy: ContinuityPolicy::AuthorityBound,
+        enabled_agents: vec!["reviewer".parse().unwrap()],
+        max_lookback_turns: 200,
+        max_recent_turns: 20,
+        max_search_results: 20,
+        max_query_bytes: 256,
+        max_result_bytes: 65536,
+        max_turn_bytes: 32768,
+        compaction_target_bytes: 8388608,
+        compaction_threshold_bytes: 12582912,
+    })
+    .unwrap()
+}
+fn peer() -> dekopon_broker::AuthenticatedContext {
+    dekopon_broker::AuthenticatedContext::new(
+        "gateway".parse().unwrap(),
+        Actor::Service {
+            principal: "gateway".parse().unwrap(),
+        },
+    )
+    .unwrap()
+}
+fn claim(conversation: &str) -> Attestation {
+    let (channel, timestamp) = conversation.split_once(':').unwrap();
+    Attestation::for_chat(
+        "slack.t0123abc.u9xyz".parse().unwrap(),
+        "reviewer".parse().unwrap(),
+        ChatScopeClaim {
+            transport: "scientist-slack".parse().unwrap(),
+            kind: ChatTransportKind::Slack,
+            conversation: Conversation {
+                kind: ConversationKind::Thread,
+                container: Some("t0123abc".into()),
+                id: channel.into(),
+                thread: Some(timestamp.into()),
+            },
+            trigger: dekopon_broker::Trigger::Message,
+        },
+    )
+}
+fn grant() -> AttestorGrant {
+    AttestorGrant {
+        namespaces: Some(vec!["slack.t0123abc".into()]),
+    }
+}
+fn temp_root() -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "memory-chat-broker-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    root.canonicalize().unwrap()
+}
+async fn record(broker: &Broker<InMemoryAuditLog>, conversation: &str, id: &str, marker: &str) {
+    let claim = claim(conversation);
+    let request = DeliveredTurnRequest::new(
+        id.parse().unwrap(),
+        TRACE.parse().unwrap(),
+        DeliveryIdentity::Slack {
+            channel: conversation.split_once(':').unwrap().0.into(),
+            timestamp: conversation.split_once(':').unwrap().1.into(),
+        },
+        marker.to_owned(),
+        DeliveredAnswer::accepted_by_transport("assistant".into()),
+    );
+    let result = broker
+        .record_delivered_turn(
+            &peer(),
+            Some(&grant()),
+            &claim.bound_to(id.parse().unwrap()),
+            request,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, InvocationOutcome::Succeeded, "{result:?}");
+}
+async fn invoke_read(
+    broker: &Broker<InMemoryAuditLog>,
+    conversation: &str,
+    argv: &[&str],
+    id: &str,
+) -> (dekopon_broker_protocol::InvocationResult, Vec<u8>) {
+    let claim = claim(conversation);
+    let args = argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let proposed = broker
+        .run_command(
+            &peer(),
+            Some(&grant()),
+            Some(&claim),
+            "memory",
+            &args,
+            false,
+        )
+        .await
+        .unwrap();
+    let CommandRunOutcome::Proposed {
+        capability, input, ..
+    } = proposed
+    else {
+        panic!("read must propose");
+    };
+    let (streams, capture) = stdout_streams();
+    let result = broker
+        .invoke(
+            &peer(),
+            Some(&grant()),
+            Some(&claim.bound_to(id.parse().unwrap())),
+            InvocationRequest {
+                id: id.parse().unwrap(),
+                capability,
+                input,
+                trace_parent: TRACE.parse().unwrap(),
+                secret_use: None,
+            },
+            streams,
+        )
+        .await
+        .unwrap();
+    let bytes = capture.join().unwrap();
+    (result.result, bytes)
+}
+async fn read(
+    broker: &Broker<InMemoryAuditLog>,
+    conversation: &str,
+    argv: &[&str],
+    id: &str,
+) -> Value {
+    let (result, bytes) = invoke_read(broker, conversation, argv, id).await;
+    assert_eq!(result.outcome, InvocationOutcome::Succeeded, "{result:?}");
+    assert_eq!(bytes.iter().filter(|&&b| b == b'\n').count(), 1);
+    serde_json::from_slice(&bytes).unwrap()
+}
+fn stored_log(root: &Path) -> std::path::PathBuf {
+    fn visit(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
             if path.is_dir() {
-                visit(&path, matches);
-            } else if path.parent().and_then(Path::file_name) == Some("data".as_ref())
-                && fs::read(&path)
-                    .expect("read opaque logical file")
-                    .windows(b"dekopon.chat-memory.turn".len())
-                    .any(|window| window == b"dekopon.chat-memory.turn")
+                visit(&path, found);
+            } else if std::fs::read(&path)
+                .unwrap()
+                .windows(b"dekopon.chat-memory.turn".len())
+                .any(|w| w == b"dekopon.chat-memory.turn")
             {
-                matches.push(path);
+                found.push(path);
             }
         }
     }
-
-    let mut matches = Vec::new();
-    visit(root, &mut matches);
-    assert_eq!(matches.len(), 1, "exactly one turns log must exist");
-    matches.pop().expect("turns log")
+    let mut found = Vec::new();
+    visit(root, &mut found);
+    assert_eq!(found.len(), 1);
+    found.pop().unwrap()
 }
-
-fn canonical_turn_bytes(id: &str, commitment: &str, user: &str, assistant: &str) -> u64 {
-    format!(
-        "{{\"format\":\"dekopon.chat-memory.turn\",\"version\":1,\"id\":{},\"commitment\":{},\"user\":{},\"assistant\":{}}}",
-        serde_json::to_string(id).expect("id JSON"),
-        serde_json::to_string(commitment).expect("commitment JSON"),
-        serde_json::to_string(user).expect("user JSON"),
-        serde_json::to_string(assistant).expect("assistant JSON")
+#[tokio::test(flavor = "multi_thread")]
+async fn published_broker_records_reads_searches_and_isolates_namespace() {
+    let root = temp_root();
+    let host = broker(&root.join("storage")).await;
+    record(
+        &host,
+        "c0123abc:1712345678.000100",
+        "turn-one",
+        "Café marker",
     )
-    .len() as u64
-        + 1
+    .await;
+    let recent = read(
+        &host,
+        "c0123abc:1712345678.000100",
+        &["recent", "--last", "1"],
+        "read-one",
+    )
+    .await;
+    assert_eq!(recent["turns"][0]["user"], "Café marker");
+    let search = read(
+        &host,
+        "c0123abc:1712345678.000100",
+        &["search", "--query", "café"],
+        "search-one",
+    )
+    .await;
+    assert_eq!(search["turns"][0]["user"], "Café marker");
+    let isolated = read(
+        &host,
+        "cother:1712345678.000200",
+        &["recent", "--last", "1"],
+        "read-other",
+    )
+    .await;
+    assert_eq!(isolated["turns"], json!([]));
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
 }
-
-fn record(id: &str, commitment: &str, user: &str, assistant: &str) -> Value {
-    json!({
-        "operation": "record",
-        "id": id,
-        "commitment": commitment,
-        "user": user,
-        "assistant": assistant,
-        "maxTurnBytes": 4096,
-        "maxLookbackTurns": 64,
-        "compactionTargetBytes": 8192,
-        "compactionThresholdBytes": 16384
-    })
-}
-
-fn recent(last: u64, max_result_bytes: u64) -> Value {
-    json!({
-        "operation": "recent",
-        "last": last,
-        "maxLookbackTurns": 64,
-        "maxRecentTurns": 64,
-        "maxResultBytes": max_result_bytes
-    })
-}
-
-fn search(query: &str, maximum: u32, max_result_bytes: u64) -> Value {
-    json!({
-        "operation": "search",
-        "query": query,
-        "maxLookbackTurns": 64,
-        "maxSearchResults": maximum,
-        "maxResultBytes": max_result_bytes
-    })
-}
-
-/// Whether the failure carries the storage evidence a namespace-touching invocation records.
-///
-/// `FakeBrokerError::storage_evidence` was deleted from the testkit in 0.13.0 as unreferenced
-/// public surface; the field it read is still public, so this repository keeps the one line it
-/// needs rather than pinning an older testkit.
-fn storage_was_reached(error: &FakeBrokerError) -> bool {
-    matches!(error, FakeBrokerError::Invocation(failure) if failure.storage.is_some())
-}
-
-async fn run(broker: &FakeBroker, argv: &[&str], stdin: Option<&str>) -> Value {
-    let argv = argv
-        .iter()
-        .map(|word| (*word).to_owned())
-        .collect::<Vec<_>>();
-    let outcome: CommandRunOutcome = broker
-        .run_command("memory", &argv, stdin)
-        .await
-        .expect("the memory word runs through the component");
-    serde_json::to_value(outcome).expect("command run JSON")
-}
-
-async fn broker() -> FakeBroker {
-    FakeBroker::builder()
-        .component(component())
-        .provider("memory-chat")
-        .storage(StorageInterface::Jsonl, StorageAccess::ReadWrite)
-        .build()
-        .await
-        .expect("memory-chat loads with exactly JSONL storage")
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn checked_component_manifest_and_command_runs_are_exact() {
-    let broker = broker().await;
-    let manifests = broker.registry().manifests().collect::<Vec<_>>();
-    assert_eq!(manifests.len(), 1);
-    assert_eq!(
-        serde_json::to_value(manifests[0]).expect("manifest JSON"),
-        json!({
-            "apiVersion": "dekopon.dev/provider/v1alpha1",
-            "id": "memory-chat",
-            "description": "Durable, on-demand, namespace-isolated chat memory",
-            "commandWords": ["memory"],
-            "capabilities": [
-                {
-                    "id": "memory.chat.record",
-                    "description": "Records one gateway-attested transport-accepted turn",
-                    "effect": "local-write",
-                    "risk": "Medium",
-                    "inputSchema": {"type":"object","additionalProperties":false}
-                },
-                {
-                    "id": "memory.chat.recent",
-                    "description": "Returns recent durable turns in chronological order",
-                    "effect": "read-only",
-                    "risk": "High",
-                    "inputSchema": {
-                        "type":"object",
-                        "properties":{"last":{"type":"integer","minimum":1}},
-                        "required":["last"],
-                        "additionalProperties":false
-                    }
-                },
-                {
-                    "id": "memory.chat.search",
-                    "description": "Searches recent durable turns with literal case-insensitive matching",
-                    "effect": "read-only",
-                    "risk": "High",
-                    "inputSchema": {
-                        "type":"object",
-                        "properties":{"query":{"type":"string","minLength":1}},
-                        "required":["query"],
-                        "additionalProperties":false
-                    }
-                }
-            ]
-        })
-    );
-
-    let recent = run(&broker, &["recent", "--last", "3"], None).await;
-    assert_eq!(
-        recent,
-        json!({
-            "outcome": "proposed",
-            "capability": "memory.chat.recent",
-            "input": {"last": 3}
-        })
-    );
-
-    let search = run(&broker, &["search", "--query", "needle"], None).await;
-    assert_eq!(
-        search,
-        json!({
-            "outcome": "proposed",
-            "capability": "memory.chat.search",
-            "input": {"query": "needle"}
-        })
-    );
-
-    // The host carries the piped value only for a `run-command` guest; a legacy rewrite never
-    // received one. Reaching the capability through it is what proves the new export is live.
-    let piped = run(&broker, &["search", "-"], Some(" piped needle \n")).await;
-    assert_eq!(
-        piped,
-        json!({
-            "outcome": "proposed",
-            "capability": "memory.chat.search",
-            "input": {"query": "piped needle"}
-        })
-    );
-
-    let help = run(&broker, &["--help"], None).await;
-    assert_eq!(help["outcome"], "rendered");
-    assert_eq!(help["status"], 0);
-    assert_eq!(help["stderr"], "");
-    let page = help["stdout"].as_str().expect("help page");
-    assert!(
-        page.starts_with("Usage: memory recent --last N\n"),
-        "{page}"
-    );
-    assert!(page.contains("memory search -\n"), "{page}");
-
-    for (argv, stdin, stderr) in [
-        (
-            &["record"][..],
-            None,
-            "memory: unrecognized arguments; try `memory --help`\n",
-        ),
-        (
-            &["search", "-"][..],
-            None,
-            "memory search -: nothing was piped in\n",
-        ),
+async fn published_broker_bounds_ordered_whole_turns() {
+    let root = temp_root();
+    let host = broker(&root.join("storage")).await;
+    for (id, marker) in [
+        ("turn-a", "alpha"),
+        ("turn-b", "bravo"),
+        ("turn-c", "charlie"),
     ] {
-        assert_eq!(
-            run(&broker, argv, stdin).await,
-            json!({"outcome": "rendered", "stdout": "", "stderr": stderr, "status": 2}),
-            "{argv:?}"
-        );
+        record(
+            &host,
+            "c0123abc:1712345678.000100",
+            id,
+            &format!("{marker} {}", "x".repeat(26_000)),
+        )
+        .await;
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn durable_record_recent_and_search_are_exact() {
-    let broker = broker().await;
+    let result = read(
+        &host,
+        "c0123abc:1712345678.000100",
+        &["recent", "--last", "3"],
+        "read-bounded",
+    )
+    .await;
+    assert_eq!(result["truncated"], true);
+    let turns = result["turns"].as_array().unwrap();
+    assert!(turns.len() < 3);
     assert_eq!(
-        broker
-            .invoke(
-                "memory.chat.record",
-                record("turn-1", "commitment-1", "Café question", "First answer"),
-            )
-            .await
-            .expect("first record"),
-        json!({"recorded": true})
+        turns.last().unwrap()["user"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .next(),
+        Some("charlie")
     );
-    broker
-        .invoke(
-            "memory.chat.record",
-            record("turn-2", "commitment-2", "second question", "CAFÉ reply"),
-        )
-        .await
-        .expect("second record");
-
-    let recent = broker
-        .invoke("memory.chat.recent", recent(2, 65_536))
-        .await
-        .expect("later invocation reads durable turns");
-    assert_eq!(recent["turns"][0]["id"], "turn-1");
-    assert_eq!(recent["turns"][1]["id"], "turn-2");
-    assert_eq!(recent["truncated"], false);
-
-    let matched = broker
-        .invoke("memory.chat.search", search("café", 1, 65_536))
-        .await
-        .expect("Unicode-lowercase literal search");
-    assert_eq!(matched["turns"].as_array().unwrap().len(), 1);
-    assert_eq!(matched["turns"][0]["id"], "turn-2");
-    assert_eq!(matched["truncated"], true);
+    drop(host);
+    std::fs::remove_dir_all(root).unwrap();
 }
-
 #[tokio::test(flavor = "multi_thread")]
-async fn namespaces_and_storage_access_are_host_owned() {
-    let first = broker().await;
-    first
-        .invoke(
-            "memory.chat.record",
-            record("private", "private-c", "secret user", "secret answer"),
+async fn published_broker_refuses_corrupt_and_truncated_log_lines() {
+    for (index, fixture) in [
+        b"not-json\n".as_slice(),
+        b"{\"format\":\"dekopon.chat-memory.turn\",\"version\":1}".as_slice(),
+        b"{\"format\":\"dekopon.chat-memory.turn\",\"version\":2}\n".as_slice(),
+        b"{\"format\":\"dekopon.chat-memory.turn\",\"version\":1,\"id\":\"x\",\"commitment\":\"c\",\"user\":\"u\",\"assistant\":\"a\",\"extra\":1}\n".as_slice(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = temp_root();
+        let host = broker(&root.join("storage")).await;
+        record(&host, "c0123abc:1712345678.000100", "seed", "seed").await;
+        std::fs::write(stored_log(&root), fixture).unwrap();
+        let (result, bytes) = invoke_read(
+            &host,
+            "c0123abc:1712345678.000100",
+            &["recent", "--last", "1"],
+            &format!("corrupt-{index}"),
         )
-        .await
-        .expect("record in first namespace");
-
-    let second = FakeBroker::builder()
-        .component(component())
-        .provider("memory-chat")
-        .storage(StorageInterface::Jsonl, StorageAccess::ReadWrite)
-        .subject("slack.t0123abc.udifferent")
-        .build()
-        .await
-        .expect("second namespace loads");
-    let isolated = second
-        .invoke("memory.chat.recent", recent(1, 65_536))
-        .await
-        .expect("isolated namespace reads cleanly");
-    assert!(isolated["turns"].as_array().unwrap().is_empty());
-
-    let read_only = FakeBroker::builder()
-        .component(component())
-        .provider("memory-chat")
-        .storage(StorageInterface::Jsonl, StorageAccess::ReadOnly)
-        .build()
-        .await
-        .expect("read-only linker still loads");
-    let denied = read_only
-        .invoke(
-            "memory.chat.record",
-            record("denied", "denied-c", "user", "assistant"),
-        )
-        .await
-        .expect_err("host refuses append without write authority");
-    assert!(
-        denied.provider_failure().is_none(),
-        "host refusal is not guest policy: {denied}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn size_read_and_replace_host_failures_are_terminal() {
-    let size_limited = FakeBroker::builder()
-        .component(component())
-        .provider("memory-chat")
-        .storage(StorageInterface::Jsonl, StorageAccess::ReadWrite)
-        .storage_limits(StorageLimits {
-            max_host_calls_per_invocation: 1,
-            ..StorageLimits::default()
-        })
-        .build()
-        .await
-        .expect("one-call storage profile is valid");
-    let size_failure = size_limited
-        .invoke(
-            "memory.chat.record",
-            record("size-failure", "size-c", "user", "assistant"),
-        )
-        .await
-        .expect_err("the second size operation exceeds the host-call ceiling");
-    assert!(
-        size_failure.provider_failure().is_none(),
-        "size refusal belongs to the host: {size_failure}"
-    );
-
-    let read_limited = FakeBroker::builder()
-        .component(component())
-        .provider("memory-chat")
-        .storage(StorageInterface::Jsonl, StorageAccess::ReadWrite)
-        .storage_limits(StorageLimits {
-            max_read_bytes_per_call: 1,
-            max_read_bytes_per_invocation: 1,
-            ..StorageLimits::default()
-        })
-        .build()
-        .await
-        .expect("narrow read profile is valid");
-    read_limited
-        .invoke(
-            "memory.chat.record",
-            record("read-failure", "read-c", "user", "assistant"),
-        )
-        .await
-        .expect("an empty namespace records without read-chunk");
-    let read_failure = read_limited
-        .invoke("memory.chat.recent", recent(1, 65_536))
-        .await
-        .expect_err("fixed 256 KiB guest read exceeds the narrow host call limit");
-    assert!(
-        read_failure.provider_failure().is_none(),
-        "read refusal belongs to the host: {read_failure}"
-    );
-
-    let replace_limited = FakeBroker::builder()
-        .component(component())
-        .provider("memory-chat")
-        .storage(StorageInterface::Jsonl, StorageAccess::ReadWrite)
-        .storage_limits(StorageLimits {
-            max_write_bytes_per_call: 200,
-            max_write_bytes_per_invocation: 200,
-            ..StorageLimits::default()
-        })
-        .build()
-        .await
-        .expect("replace-failure profile is valid");
-    let mut compacting = record("replace-failure", "replace-c", "user", "assistant");
-    compacting["compactionThresholdBytes"] = json!(1);
-    compacting["compactionTargetBytes"] = json!(4096);
-    let replace_failure = replace_limited
-        .invoke("memory.chat.record", compacting)
-        .await
-        .expect_err("replacement exceeds cumulative write quota after both appends");
-    assert!(storage_was_reached(&replace_failure));
-    let after = replace_limited
-        .invoke("memory.chat.recent", recent(1, 65_536))
-        .await
-        .expect("reads remain available after the refused replacement");
-    assert_eq!(after["turns"].as_array().unwrap().len(), 1);
-    assert_eq!(after["turns"][0]["id"], "replace-failure");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn canonical_turn_byte_bound_accepts_exactly_and_rejects_one_less() {
-    let exact_turn = broker().await;
-    let turn_bytes = canonical_turn_bytes("turn-bound", "turn-c", "user", "assistant");
-    let mut input = record("turn-bound", "turn-c", "user", "assistant");
-    input["maxTurnBytes"] = json!(turn_bytes);
-    exact_turn
-        .invoke("memory.chat.record", input)
-        .await
-        .expect("exact maxTurnBytes accepts the complete canonical line");
-
-    let short_turn = broker().await;
-    let mut input = record("turn-bound", "turn-c", "user", "assistant");
-    input["maxTurnBytes"] = json!(turn_bytes - 1);
-    let error = short_turn
-        .invoke("memory.chat.record", input)
-        .await
-        .expect_err("one byte below maxTurnBytes is rejected");
-    assert_eq!(
-        error.provider_failure().map(|value| value.0),
-        Some("result-too-large")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn corrupt_and_truncated_host_backed_turn_logs_fail_closed() {
-    let fixtures = [
-        br#"{"format":"dekopon.chat-memory.turn","version":2,"id":"bad","commitment":"c","user":"u","assistant":"a"}
-"#.as_slice(),
-        br#"{"format":"dekopon.chat-memory.turn","version":1,"id":"bad","commitment":"c","user":"u","assistant":"a","unknown":true}
-"#.as_slice(),
-        b"{\"format\":\n".as_slice(),
-        br#"{"format":"dekopon.chat-memory.turn","version":1,"id":"bad","commitment":"c","user":"u","assistant":"a"}"#.as_slice(),
-    ];
-
-    for (index, fixture) in fixtures.into_iter().enumerate() {
-        let broker = broker().await;
-        broker
-            .invoke(
-                "memory.chat.record",
-                record("seed", "seed-c", "user", "assistant"),
-            )
-            .await
-            .expect("seed host-backed turns log");
-        fs::write(stored_turns_path(broker.storage_root()), fixture)
-            .expect("install corrupt host-backed fixture");
-        let error = broker
-            .invoke("memory.chat.recent", recent(1, 65_536))
-            .await
-            .expect_err("corrupt host-backed turns log must fail closed");
-        assert_eq!(
-            error.provider_failure().map(|value| value.0),
-            Some("memory-corrupt"),
-            "fixture {index}"
-        );
+        .await;
+        assert_eq!(result.outcome, InvocationOutcome::Failed, "{result:?}");
+        assert!(bytes.is_empty());
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn compaction_and_result_bounds_remain_independent() {
-    let broker = broker().await;
-    for index in 0..3 {
-        let mut value = record(
-            &format!("compact-{index}"),
-            &format!("commit-{index}"),
-            &format!("user-{index}"),
-            &format!("answer-{index}"),
-        );
-        value["compactionThresholdBytes"] = json!(1);
-        value["compactionTargetBytes"] = json!(420);
-        value["maxLookbackTurns"] = json!(2);
-        broker
-            .invoke("memory.chat.record", value)
-            .await
-            .expect("bounded compaction succeeds");
-    }
-    let compacted = broker
-        .invoke("memory.chat.recent", recent(3, 65_536))
-        .await
-        .expect("compacted turns remain readable");
-    assert!(compacted["turns"].as_array().unwrap().len() <= 2);
-    assert_eq!(
-        compacted["turns"].as_array().unwrap().last().unwrap()["id"],
-        "compact-2"
-    );
-
-    let too_small = broker
-        .invoke("memory.chat.recent", recent(1, 1))
-        .await
-        .expect_err("even envelope must fit result bound");
-    assert_eq!(
-        too_small.provider_failure().map(|value| value.0),
-        Some("result-too-large")
-    );
-}
-
-#[test]
-fn generated_component_is_not_a_source_fixture() {
-    assert!(!component().is_dir());
 }
