@@ -1,5 +1,3 @@
-//! Real published 0.36 broker + storage host JSONL witnesses against the built component.
-//!
 //! Read-only write-denial hosting gap: broker 0.36 enforces read-write JSONL for the
 //! record route and read-only JSONL for recent/search when constructing its routed
 //! constraint catalog (`CapabilityRoute::chat_memory_access`, `ConstraintCatalog::new`).
