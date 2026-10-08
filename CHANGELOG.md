@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.6.1] - 2026-10-08
+
+- **Changed:** Pin the SDK, broker, storage host and testkit to core 0.36.0; provider commands and WIT remain unchanged.
+
 ## [0.6.0] - 2026-10-06
 
 - **Changed:** Rename memory capability IDs to `memory-chat.record`, `memory-chat.recent` and `memory-chat.search`.
